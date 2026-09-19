@@ -60,7 +60,7 @@ function VideoDetail() {
       const blob = await res.blob();
       const file = new File([blob], "video.mp4", { type: blob.type || "video/mp4" });
 
-      const { segments } = await extractSpeechSegments(file, (m) => setStatus(m));
+      const { segments, durationSec } = await extractSpeechSegments(file, (m) => setStatus(m));
 
       const out: { start_ms: number; end_ms: number; text: string }[] = [];
       for (let i = 0; i < segments.length; i++) {
@@ -76,7 +76,7 @@ function VideoDetail() {
       }
 
       setStatus("Working out who speaks each line…");
-      await save({ data: { videoId, cues: out } });
+      await save({ data: { videoId, durationSec, cues: out } });
       await qc.invalidateQueries({ queryKey: ["video", videoId] });
       setStatus(null);
     } catch (err) {

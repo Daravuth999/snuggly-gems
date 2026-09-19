@@ -73,7 +73,7 @@ export const createVideo = createServerFn({ method: "POST" })
       .object({
         title: z.string().min(1),
         storagePath: z.string().min(1),
-        durationSec: z.number().positive(),
+        durationSec: z.number().min(0),
         language: z.enum(["en", "km"]),
       })
       .parse(input),
@@ -153,6 +153,7 @@ export const saveTranscript = createServerFn({ method: "POST" })
     z
       .object({
         videoId: z.string().uuid(),
+        durationSec: z.number().min(0),
         cues: z.array(
           z.object({ start_ms: z.number(), end_ms: z.number(), text: z.string() }),
         ),
@@ -201,7 +202,7 @@ export const saveTranscript = createServerFn({ method: "POST" })
     }
     await context.supabase
       .from("videos")
-      .update({ status: "transcribed" })
+      .update({ status: "transcribed", duration_sec: data.durationSec })
       .eq("id", data.videoId);
     return { cues: rows as Cue[] };
   });

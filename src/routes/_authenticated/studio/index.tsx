@@ -38,11 +38,15 @@ function StudioHome() {
     setError(null);
     setBusy("Uploading the video…");
     try {
-      const durationSec = await new Promise<number>((resolve, reject) => {
+      // Best-effort duration; some browsers can't read metadata for every
+      // container, and the real duration is measured during transcription.
+      const durationSec = await new Promise<number>((resolve) => {
         const el = document.createElement("video");
         el.preload = "metadata";
-        el.onloadedmetadata = () => resolve(el.duration || 0);
-        el.onerror = () => reject(new Error("That file could not be read as a video."));
+        const done = (v: number) => resolve(Number.isFinite(v) && v > 0 ? v : 0);
+        el.onloadedmetadata = () => done(el.duration);
+        el.onerror = () => done(0);
+        setTimeout(() => done(0), 8000);
         el.src = URL.createObjectURL(file);
       });
 
@@ -57,7 +61,7 @@ function StudioHome() {
         data: {
           title: file.name.replace(/\.[^.]+$/, ""),
           storagePath: path,
-          durationSec: Math.max(1, durationSec),
+          durationSec,
           language,
         },
       });
