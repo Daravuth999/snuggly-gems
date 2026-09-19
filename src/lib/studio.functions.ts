@@ -20,6 +20,16 @@ export type NarrationLine = {
   audio_ms: number | null;
 };
 
+export type TranscriptWord = {
+  idx: number;
+  cue_idx: number | null;
+  start_ms: number;
+  end_ms: number;
+  speaker: string | null;
+  text: string;
+  confidence: number | null;
+};
+
 /** Grant admin to the first ever user, or to an invited email. */
 export const claimAdmin = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -111,6 +121,11 @@ export const getVideo = createServerFn({ method: "POST" })
       .select("*")
       .eq("video_id", data.id)
       .order("idx");
+    const words = await context.supabase
+      .from("transcript_words")
+      .select("*")
+      .eq("video_id", data.id)
+      .order("idx");
     const signed = await context.supabase.storage
       .from("studio")
       .createSignedUrl(video.data.storage_path, 60 * 60 * 6);
@@ -118,6 +133,7 @@ export const getVideo = createServerFn({ method: "POST" })
       video: video.data,
       cues: (cues.data ?? []) as Cue[],
       narration: (narration.data ?? []) as NarrationLine[],
+      words: (words.data ?? []) as TranscriptWord[],
       videoUrl: signed.data?.signedUrl ?? null,
     };
   });
@@ -144,6 +160,90 @@ export const transcribeSegment = createServerFn({ method: "POST" })
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     const text = await transcribeAudio(bytes, data.language ?? undefined);
     return { text };
+  });
+
+/** Transcribe the full source with measured word timestamps and speaker detection. */
+export const generateWordTimings = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: unknown) => z.object({ videoId: z.string().uuid() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const apiKey = process.env['ELEVENLABS_API_KEY'];
+    if (!apiKey) throw new Error("ElevenLabs is not connected to this project.");
+
+    const video = await context.supabase
+      .from("videos")
+      .select("storage_path")
+      .eq("id", data.videoId)
+      .single();
+    if (video.error) throw video.error;
+
+    const signed = await context.supabase.storage
+      .from("studio")
+      .createSignedUrl(video.data.storage_path, 60 * 60);
+    if (signed.error || !signed.data?.signedUrl) {
+      throw signed.error ?? new Error("Could not prepare the video for word timing.");
+    }
+
+    const form = new FormData();
+    form.append("cloud_storage_url", signed.data.signedUrl);
+    form.append("model_id", "scribe_v2");
+    form.append("timestamps_granularity", "word");
+    form.append("diarize", "true");
+    form.append("tag_audio_events", "false");
+
+    const response = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+      method: "POST",
+      headers: { "xi-api-key": apiKey },
+      body: form,
+    });
+    if (!response.ok) {
+      const message = await response.text().catch(() => "");
+      throw new Error(`ElevenLabs word timing failed [${response.status}]: ${message}`);
+    }
+
+    const result = (await response.json()) as {
+      words?: Array<{
+        text?: string;
+        type?: string;
+        start?: number | null;
+        end?: number | null;
+        speaker_id?: string | null;
+        logprob?: number | null;
+      }>;
+    };
+    const timed = (result.words ?? []).filter(
+      (word) =>
+        word.type === "word" &&
+        typeof word.start === "number" &&
+        typeof word.end === "number" &&
+        Boolean(word.text?.trim()),
+    );
+    if (!timed.length) throw new Error("No spoken words were detected in this video.");
+
+    await context.supabase.from("transcript_words").delete().eq("video_id", data.videoId);
+    let cueIdx = 0;
+    let previousSpeaker: string | null | undefined;
+    let previousEnd = 0;
+    const rows = timed.map((word, idx) => {
+      const speaker = word.speaker_id ?? null;
+      const startMs = Math.round((word.start ?? 0) * 1000);
+      if (idx > 0 && (speaker !== previousSpeaker || startMs - previousEnd > 800)) cueIdx++;
+      previousSpeaker = speaker;
+      previousEnd = Math.round((word.end ?? word.start ?? 0) * 1000);
+      return {
+        video_id: data.videoId,
+        cue_idx: cueIdx,
+        idx,
+        start_ms: startMs,
+        end_ms: previousEnd,
+        speaker,
+        text: word.text?.trim() ?? "",
+        confidence: typeof word.logprob === "number" ? word.logprob : null,
+      };
+    });
+    const inserted = await context.supabase.from("transcript_words").insert(rows);
+    if (inserted.error) throw inserted.error;
+    return { words: rows as TranscriptWord[] };
   });
 
 /** Save measured cues, then label who is speaking in each one. */

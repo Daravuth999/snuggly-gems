@@ -4,6 +4,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { useState } from "react";
 import {
   generateNarration,
+  generateWordTimings,
   getVideo,
   saveTranscript,
   signAudio,
@@ -12,6 +13,7 @@ import {
 } from "@/lib/studio.functions";
 import { buildSrt, downloadText, extractSpeechSegments } from "@/lib/audio";
 import { Banner, Button, Card, Screen, Spinner, TopBar } from "@/components/app-ui";
+import { KaraokePrompter } from "@/components/karaoke-prompter";
 
 export const Route = createFileRoute("/_authenticated/studio/$videoId")({
   head: () => ({
@@ -36,6 +38,7 @@ function VideoDetail() {
   const transcribe = useServerFn(transcribeSegment);
   const save = useServerFn(saveTranscript);
   const script = useServerFn(generateNarration);
+  const alignWords = useServerFn(generateWordTimings);
   const synth = useServerFn(synthesizeLine);
   const sign = useServerFn(signAudio);
 
@@ -51,6 +54,7 @@ function VideoDetail() {
   const data = q.data;
   const cues = data?.cues ?? [];
   const narration = data?.narration ?? [];
+  const words = data?.words ?? [];
 
   async function runTranscription() {
     if (!data?.videoUrl) return;
@@ -96,6 +100,19 @@ function VideoDetail() {
       await qc.invalidateQueries({ queryKey: ["video", videoId] });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not write the script.");
+    } finally {
+      setStatus(null);
+    }
+  }
+
+  async function runWordTiming() {
+    setError(null);
+    setStatus("Measuring every spoken word and speaker…");
+    try {
+      await alignWords({ data: { videoId } });
+      await qc.invalidateQueries({ queryKey: ["video", videoId] });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not measure the word timings.");
     } finally {
       setStatus(null);
     }
@@ -153,7 +170,7 @@ function VideoDetail() {
 
         {data && (
           <>
-            {data.videoUrl && (
+            {data.videoUrl && words.length === 0 && (
               <video
                 src={data.videoUrl}
                 controls
@@ -166,6 +183,9 @@ function VideoDetail() {
             {error && <Banner tone="bad">{error}</Banner>}
 
             <Card className="space-y-2.5">
+              <Button onClick={runWordTiming} disabled={Boolean(status)}>
+                {words.length ? "Refresh karaoke timing" : "Create word-synced karaoke"}
+              </Button>
               <Button onClick={runTranscription} disabled={Boolean(status)}>
                 {cues.length ? "Transcribe again" : "1 · Transcribe the original audio"}
               </Button>
@@ -182,6 +202,20 @@ function VideoDetail() {
                 </Button>
               )}
             </Card>
+
+            {data.videoUrl && words.length > 0 && (
+              <section>
+                <div className="mb-3 px-1">
+                  <h2 className="text-[13px] font-semibold uppercase tracking-widest text-ink-400">
+                    Word-synced teleprompter
+                  </h2>
+                  <p className="mt-1 text-[12px] text-ink-400">
+                    Tap any word to replay from its measured start time.
+                  </p>
+                </div>
+                <KaraokePrompter videoUrl={data.videoUrl} words={words} />
+              </section>
+            )}
 
             {cues.length > 0 && (
               <section>
