@@ -519,58 +519,24 @@ async def run_pipeline(db, lesson_id: str, media_bucket, *, imported_transcript:
             await _set_step(db, lesson_id, run_id, "speech_recognition", "running")
             await sync_studio_tools.mark_alignment_processing(db, sync_id)
             alignment_provider = video_word_alignment.get_word_alignment_provider()
-            if alignment_provider is not None and alignment_provider.provider_version.startswith("elevenlabs-scribe"):
-                try:
-                    result = await alignment_provider.align(transcribe_bytes, content_type=transcribe_ct)
-                    transcript_text = result.get("transcriptText", "")
-                    measured_words = [
-                        word
-                        for paragraph in (result.get("sync") or {}).get("paragraphs") or []
-                        for sentence in paragraph.get("sentences") or []
-                        for word in sentence.get("words") or []
-                    ]
-                    if not measured_words:
-                        raise RuntimeError("ElevenLabs returned no spoken words")
-                    confidences = [
-                        word["confidence"]["transcript"]
-                        for word in measured_words
-                        if isinstance((word.get("confidence") or {}).get("transcript"), (int, float))
-                    ]
-                    word_alignment_meta = {
-                        "status": "complete",
-                        "provider": alignment_provider.provider_version,
-                        "totalWords": len(measured_words),
-                        "matchedWords": len(measured_words),
-                        "matchRatio": 1.0,
-                        "meanAlignmentConfidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
-                        "lowConfidenceWordCount": sum(confidence < 0.7 for confidence in confidences),
-                        "languageCode": result.get("languageCode"),
-                        "languageProbability": result.get("languageProbability"),
-                        "attemptedAt": _now(),
-                    }
-                    result["sync"]["wordAlignment"] = word_alignment_meta
-                except Exception as exc:  # noqa: BLE001 — preserve the existing lesson workflow
-                    logger.warning("video_pipeline: ElevenLabs timing failed lesson=%s (%s)", lesson_id, exc)
-                    result = await provider.align(transcribe_bytes, transcribe_ct)
-                    transcript_text = result.get("transcriptText", "")
-                    word_alignment_meta = {
-                        "status": "failed",
-                        "provider": alignment_provider.provider_version,
-                        "error": f"{type(exc).__name__}: {exc}",
-                        "attemptedAt": _now(),
-                    }
-                    result["sync"]["wordAlignment"] = word_alignment_meta
-            else:
-                # Explicit rollback path: retain the established Gemini
-                # sentence structure and merge measured words onto it.
-                result = await provider.align(transcribe_bytes, transcribe_ct)
-                transcript_text = result.get("transcriptText", "")
-                aligned_sync, word_alignment_meta = await video_word_alignment.run_word_alignment(
-                    transcribe_bytes, transcript_text, result.get("sync") or {}, transcribe_ct,
-                    provider=alignment_provider,
-                )
-                result["sync"] = aligned_sync
-                result["sync"]["wordAlignment"] = word_alignment_meta
+            # ONE path for every provider (ElevenLabs Scribe by default,
+            # Gemini on rollback). Gemini keeps producing the canonical
+            # paragraph/sentence structure the educational analysis,
+            # sentence IDs, speaker labels and translations are keyed to;
+            # run_word_alignment then merges the provider's MEASURED word
+            # timings onto that structure. run_word_alignment also owns the
+            # VIDEO_ALIGNMENT_MAX_SECONDS duration guard and never raises,
+            # so a provider outage degrades to interpolated timing instead
+            # of failing the lesson — and never triggers a second
+            # transcription call.
+            result = await provider.align(transcribe_bytes, transcribe_ct)
+            transcript_text = result.get("transcriptText", "")
+            aligned_sync, word_alignment_meta = await video_word_alignment.run_word_alignment(
+                transcribe_bytes, transcript_text, result.get("sync") or {}, transcribe_ct,
+                provider=alignment_provider,
+            )
+            result["sync"] = aligned_sync
+            result["sync"]["wordAlignment"] = word_alignment_meta
 
             # 2026-09 speaker-continuity quality signal (§2d/4c) — never
             # blocks or fails the step; a non-fatal note only, same
