@@ -11,3 +11,5 @@
 - [x] Rebuild karaoke presentation, search, looping, accessibility, and reading presets.
 - [x] Upgrade the Author Studio preview and synchronization editing presentation.
 - [x] Verify focused frontend/backend behavior and package one audited V3 ZIP.
+
+- [ ] Apply and verify the approved premium Video Library dashboard mockup without changing playback timing or speaker labels.
