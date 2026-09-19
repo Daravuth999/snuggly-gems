@@ -502,7 +502,7 @@ describe("V3 cinematic practice tools", () => {
     fireEvent.click(await screen.findByTestId("video-open-script-button"));
     expect(screen.getByTestId("video-script-overlay")).toBeInTheDocument();
     fireEvent.change(screen.getByTestId("video-transcript-search"), { target: { value: "Hello" } });
-    fireEvent.click(screen.getByText("Hello"));
+    fireEvent.click(screen.getAllByText("Hello").find((node) => node.closest("button")));
     expect(video.currentTime).toBe(0);
     expect(screen.queryByTestId("video-script-overlay")).not.toBeInTheDocument();
   });
