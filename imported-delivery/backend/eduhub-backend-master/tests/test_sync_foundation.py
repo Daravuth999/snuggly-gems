@@ -158,8 +158,8 @@ def test_elevenlabs_provider_requires_generate_fn():
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# sync_provider.py — ScribeAlignmentProvider (CANDIDATE, not production-
-# wired). Confirmed request/response shape per ElevenLabs' own API
+# sync_provider.py — production ScribeAlignmentProvider. Confirmed
+# request/response shape per ElevenLabs' own API
 # reference (2026-08-06): POST /v1/speech-to-text, words carry
 # {text, start, end, type, speaker_id, logprob}. All tests below inject a
 # fake http_post — zero real network calls, matching this repo's
@@ -186,7 +186,9 @@ async def test_scribe_provider_align_converts_logprob_to_probability():
     # logprob=0.0 -> exp(0.0) == 1.0, the maximum-confidence case.
     assert word["confidence"]["transcript"] == pytest.approx(1.0)
     assert "alignment" not in word["confidence"]  # honestly omitted, not fabricated
+    assert word["measured"] is True
     assert result["sync"]["providerCategory"] == "speech_recognition"
+    assert result["languageCode"] == "eng"
 
 
 @pytest.mark.asyncio
@@ -202,6 +204,29 @@ async def test_scribe_provider_skips_non_word_entries():
     result = await p.align(b"x")
     words = result["sync"]["paragraphs"][0]["sentences"][0]["words"]
     assert [w["word"] for w in words] == ["Hello", "world"]
+
+
+@pytest.mark.asyncio
+async def test_scribe_provider_rejects_empty_audio_before_network():
+    p = provider.ScribeAlignmentProvider("fake-key", http_post=lambda *a, **k: None)
+    with pytest.raises(ValueError, match="non-empty audio"):
+        await p.align(b"")
+
+
+@pytest.mark.asyncio
+async def test_scribe_provider_drops_invalid_or_reverse_order_spans():
+    async def fake_post(audio_bytes, language_code):
+        return {"words": [
+            _scribe_word("Good", 1.0, 1.2),
+            _scribe_word("inverted", 1.3, 1.1),
+            _scribe_word("backward", 0.2, 0.4),
+            _scribe_word("day", 1.25, 1.5),
+        ]}
+
+    p = provider.ScribeAlignmentProvider("fake-key", http_post=fake_post)
+    result = await p.align(b"x")
+    words = result["sync"]["paragraphs"][0]["sentences"][0]["words"]
+    assert [word["word"] for word in words] == ["Good", "day"]
 
 
 @pytest.mark.asyncio

@@ -1,8 +1,8 @@
 """tests/test_video_word_alignment.py — real per-word alignment merge
 (video_word_alignment.py), the Teleprompter karaoke structural-fix §1.
 
-2026-09: Gemini-only redesign, immediately following the previous commit's
-ElevenLabs removal. Covers: honest word-level merging (matched words get
+2026-09: ElevenLabs timing migration with a controlled Gemini rollback.
+Covers: honest word-level merging (matched words get
 real gemini-3.5-transcribe timing + a `measured: True` provenance flag,
 never a fabricated confidence number; unmatched words keep Gemini
 segmentation's own interpolation untouched), multi-speaker/silence/
@@ -451,14 +451,11 @@ async def test_gemini_word_timestamp_provider_raises_on_non_200():
         await provider.align(b"fake-audio-bytes", "audio/mpeg")
 
 
-def test_word_timestamp_model_is_independently_overridable(monkeypatch):
-    """Mirrors video_ai_provider.py's own VIDEO_AI_MODEL/VIDEO_ANALYSIS_MODEL
-    per-stage-override convention — changing this can never silently affect
-    ASR segmentation or deep story analysis, or vice versa."""
-    monkeypatch.delenv("VIDEO_ALIGNMENT_MODEL", raising=False)
-    assert vwa._word_timestamp_model() == "gemini-3.5-transcribe"
-    monkeypatch.setenv("VIDEO_ALIGNMENT_MODEL", "gemini-4.0-transcribe-preview")
-    assert vwa._word_timestamp_model() == "gemini-4.0-transcribe-preview"
+def test_scribe_model_is_independently_overridable(monkeypatch):
+    monkeypatch.delenv("ELEVENLABS_SCRIBE_MODEL", raising=False)
+    assert vwa._scribe_model() == "scribe_v2"
+    monkeypatch.setenv("ELEVENLABS_SCRIBE_MODEL", "scribe_v2_test")
+    assert vwa._scribe_model() == "scribe_v2_test"
 
 
 # ── run_word_alignment — provider orchestration + resilience ──────────────
@@ -533,19 +530,23 @@ async def test_run_word_alignment_merges_on_a_successful_provider_call():
     assert telemetry["matchedWords"] == 1
 
 
-def test_get_word_alignment_provider_is_none_without_a_gemini_api_key(monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("VIDEO_AI_MOCK", raising=False)
+def test_get_word_alignment_provider_is_none_without_an_elevenlabs_api_key(monkeypatch):
+    monkeypatch.setenv("VIDEO_ALIGNMENT_PROVIDER", "elevenlabs")
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
     assert vwa.get_word_alignment_provider() is None
 
 
-def test_get_word_alignment_provider_is_none_when_mock_mode_forced(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key-123")
-    monkeypatch.setenv("VIDEO_AI_MOCK", "1")
-    assert vwa.get_word_alignment_provider() is None
+def test_get_word_alignment_provider_constructs_scribe_by_default(monkeypatch):
+    monkeypatch.delenv("VIDEO_ALIGNMENT_PROVIDER", raising=False)
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test-key-123")
+    provider = vwa.get_word_alignment_provider()
+    assert provider is not None
+    assert provider.category == "speech_recognition"
+    assert provider.provider_version == "elevenlabs-scribe-v2"
 
 
 def test_get_word_alignment_provider_constructs_a_real_gemini_provider_when_key_present(monkeypatch):
+    monkeypatch.setenv("VIDEO_ALIGNMENT_PROVIDER", "gemini")
     monkeypatch.setenv("GEMINI_API_KEY", "test-key-123")
     monkeypatch.delenv("VIDEO_AI_MOCK", raising=False)
     provider = vwa.get_word_alignment_provider()
@@ -554,21 +555,11 @@ def test_get_word_alignment_provider_constructs_a_real_gemini_provider_when_key_
     assert provider.provider_version == "gemini-word-timestamps-v1 (gemini-3.5-transcribe)"
 
 
-def test_no_dead_elevenlabs_code_remains_in_this_module():
-    """Permanent regression guard for Rule 1 of the 2026-09 redesign: no
-    ElevenLabs/Scribe IMPORT, ENV VAR, OR NETWORK CALL left in this
-    feature's module — checked against the module's OWN source text, not
-    memory. Deliberately does NOT ban the words "ElevenLabs"/"Scribe"
-    outright: the module docstring intentionally documents what was
-    removed and why (this codebase's own "dense version-history header
-    comments explaining why a change was made" convention) — that is
-    documentation, not dead code."""
+def test_elevenlabs_is_selected_only_in_authoring_module():
     source = Path(vwa.__file__).read_text(encoding="utf-8")
-    assert "ELEVENLABS_API_KEY" not in source
-    assert "ScribeAlignmentProvider" not in source
-    assert "ElevenLabsProvider" not in source
-    assert "sync_provider" not in source  # that's where both of the above live
-    assert "api.elevenlabs.io" not in source
+    assert "ELEVENLABS_API_KEY" in source
+    assert "ScribeAlignmentProvider" in source
+    assert "api.elevenlabs.io" not in source  # network boundary remains sync_provider.py
 
 
 # ── architectural guarantee (§1.3/§1.7): authoring-time only, never

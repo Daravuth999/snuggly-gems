@@ -1,4 +1,4 @@
-# Video Library — Gemini Activation & Deployment Checklist
+# Video Library — ElevenLabs Timing + Gemini Learning Deployment
 
 **Status:** All Video Library code (backend routes, pipeline, Review
 Studio, student player, purchase flow) is built, tested, and merged to
@@ -13,15 +13,22 @@ branch is merged and deployed, the routes and UI are live immediately.
 
 ---
 
-## 1. Required environment variable (only one is mandatory)
+## 1. Required Render environment variables
 
 Set on the **eduhub-backend** Render service → Environment:
 
 ```
 GEMINI_API_KEY=<your Gemini API key>
+ELEVENLABS_API_KEY=<your ElevenLabs API key>
+VIDEO_ALIGNMENT_PROVIDER=elevenlabs
+ELEVENLABS_SCRIBE_MODEL=scribe_v2
 ```
 
-This is the only variable required for real (non-mock) AI processing.
+ElevenLabs Scribe v2 is the one-time speech, speaker, and measured word-timing
+engine. Gemini remains responsible for translation, grammar, vocabulary,
+summaries, explanations, and story analysis. These secrets belong on the
+Render backend only; never add them to Vercel or any `REACT_APP_*` variable.
+
 Get a key from [Google AI Studio](https://aistudio.google.com/apikey) if
 one isn't already provisioned — check first, since this codebase's other
 Gemini integrations (`voice_treasure_gemini.py`, `ai_assistant_tools.py`,
@@ -30,12 +37,16 @@ Gemini integrations (`voice_treasure_gemini.py`, `ai_assistant_tools.py`,
 Library reuses it — no second key, no second provider, nothing new to
 provision.**
 
-## 2. Optional environment variables
+## 2. Optional environment variables and rollback
 
 ```
 VIDEO_AI_MODEL=gemini-2.5-flash     # default if unset; any generateContent-capable model works
 VIDEO_AI_MOCK=1                     # forces deterministic mock ASR even if GEMINI_API_KEY is set
+VIDEO_ALIGNMENT_MAX_SECONDS=1800    # reject oversized paid timing calls before upload
 ```
+
+Temporary rollback: set `VIDEO_ALIGNMENT_PROVIDER=gemini`. This restores the
+legacy Gemini timestamp merge without changing saved lesson documents.
 
 Leave both unset for normal production behavior. `VIDEO_AI_MOCK` exists
 for staging/demo environments where you want the pipeline to run without
@@ -43,11 +54,8 @@ burning Gemini quota — the mock produces clearly-labeled placeholder
 transcripts (`provider_version: "mock-asr-v1"`), never something that
 could be mistaken for real speech recognition.
 
-**If `GEMINI_API_KEY` is absent and `VIDEO_AI_MOCK` is not set:** the
-pipeline still runs, but automatically falls back to the mock provider
-(same as `VIDEO_AI_MOCK=1`) rather than failing lessons. This is
-intentional — it means the Video Library is safe to deploy *before* the
-key is set, but transcripts won't be real until the key is added.
+If `ELEVENLABS_API_KEY` is absent, measured timing is reported as unavailable;
+the system does not silently describe estimated timing as audio-synced.
 
 ## 3. Database — no migration required
 
@@ -77,7 +85,8 @@ feature already uses. No new frontend env var.
 1. Merge `audit/video-library-production-fixes` → your integration branch
    → `master` in **both** repos (backend, frontend), or deploy the audit
    branch directly if that's your current workflow.
-2. Render (backend): confirm `GEMINI_API_KEY` is set (step 1). Deploy.
+2. Render (backend): confirm both API keys and the alignment provider values
+   are set (step 1). Deploy.
    Watch the boot log for `video_library_tools: disabled (...)` or
    `video_pipeline_tools: disabled (...)` — if either line appears, the
    import failed and the feature is silently off; if neither appears,
@@ -92,9 +101,9 @@ feature already uses. No new frontend env var.
 
 ## 7. Turning it off
 
-There is no dedicated kill switch, because there is no flag. To disable:
-remove `GEMINI_API_KEY` (pipeline falls back to mock — lessons process
-but with placeholder transcripts, nothing crashes) or revert the merge.
+To roll timing back without changing the frontend or stored lessons, set
+`VIDEO_ALIGNMENT_PROVIDER=gemini` on Render and redeploy. Already approved
+documents remain unchanged until an administrator explicitly reprocesses them.
 Nothing this feature writes affects any other collection ownership
 (verified via `tools/check_collection_ownership.py --strict`), so a
 revert is clean.
@@ -111,8 +120,8 @@ Everything below the line is real evidence, not aspiration:
   every backend route cross-referenced against a frontend consumer (two
   gaps found and fixed this round: `GET /video/purchases/mine` and the
   admin reconcile-listing route).
-- **Not verified, and cannot be from here:** a live Gemini API call
-  (no `GEMINI_API_KEY` is configured in this local/dev environment), and
+- **Not verified, and cannot be from here:** a live call against your own
+  Render environment and production MongoDB, and
   end-to-end behavior against your actual deployed Render/Vercel/MongoDB
   production stack. This environment has no live MongoDB, no Docker, and
   no network path to your production infrastructure — "verified against
