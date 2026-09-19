@@ -39,15 +39,25 @@ function AuthPage() {
           options: { emailRedirectTo: `${window.location.origin}/studio` },
         });
         if (error) throw error;
-        setNotice("Account created. Sign in below.");
-        setMode("in");
+        const signedIn = await supabase.auth.signInWithPassword({ email, password });
+        if (signedIn.error) {
+          setNotice("Account created. Sign in below.");
+          setMode("in");
+        } else {
+          await navigate({ to: "/studio" });
+        }
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
         await navigate({ to: "/studio" });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong.");
+      const msg = err instanceof Error ? err.message : "Something went wrong.";
+      setError(
+        /invalid login credentials/i.test(msg)
+          ? "That email and password don't match. Check for typos, or create the account first."
+          : msg,
+      );
     } finally {
       setBusy(false);
     }
