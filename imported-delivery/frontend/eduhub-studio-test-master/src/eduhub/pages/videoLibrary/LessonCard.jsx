@@ -58,7 +58,7 @@ export default function LessonCard({ lesson, progressFraction, onOpen, featured 
     <button
       onClick={() => onOpen?.(lesson)}
       data-testid={`video-lesson-card-${lesson.lessonId}`}
-      className={`vl-card group relative flex-shrink-0 text-left overflow-hidden ${featured ? "vl-card-featured w-[82vw] max-w-[420px] sm:w-[380px]" : "w-[176px] sm:w-[214px]"}`}
+      className={`vl-card group relative flex-shrink-0 text-left overflow-hidden ${featured ? "vl-card-featured w-[82vw] max-w-[420px] sm:w-[380px]" : "w-[168px] sm:w-[196px]"}`}
     >
       <div className="relative aspect-video bg-black/40 overflow-hidden">
         {thumbnailUrl ? (
