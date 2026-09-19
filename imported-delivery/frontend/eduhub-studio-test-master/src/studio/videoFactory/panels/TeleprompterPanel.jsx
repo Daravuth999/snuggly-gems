@@ -200,7 +200,7 @@ export default function TeleprompterPanel({ lesson, onChanged }) {
                 flex context to resolve against — the exact same pattern
                 VideoLessonPlayer.jsx's side panel already uses correctly. */}
             <div className="flex-1 min-h-0 flex flex-col text-white" data-testid="teleprompter-live-preview">
-              <Teleprompter sync={sync} mediaRef={mediaRef} currentTime={currentTime} config={{ ...config, centerFocus: true }}
+              <Teleprompter sync={sync} mediaRef={mediaRef} currentTime={currentTime} config={config}
                             onSeek={(t) => { if (mediaRef.current) mediaRef.current.currentTime = t; }}
                             className="flex-1 min-h-0" />
             </div>
