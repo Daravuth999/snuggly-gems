@@ -24,7 +24,7 @@ import pytest
 import video_pipeline_tools as vpt
 import video_word_alignment as vwa
 
-from test_video_pipeline_provider_tag import _run_real_pipeline, _measured_word
+from tests.test_video_pipeline_provider_tag import _run_real_pipeline, _measured_word
 
 
 class _Scribe:
