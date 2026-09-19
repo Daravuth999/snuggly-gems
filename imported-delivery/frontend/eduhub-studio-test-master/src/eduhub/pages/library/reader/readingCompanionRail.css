@@ -1,0 +1,164 @@
+/* readingCompanionRail.css — Reading Companion rail.
+ *
+ * Same dark glassmorphic "control surface" language ReadingHub.jsx used
+ * (deliberately NOT tied to the reader's light/sepia/dark reading theme —
+ * this is a system-level control overlay, not reading content), but two
+ * always-visible labeled controls instead of one bubble that had to be
+ * tapped open to find out what it contained.
+ */
+
+.companion-rail {
+  position: fixed;
+  right: max(16px, env(safe-area-inset-right));
+  /* Clears the Reader route's own sticky bottom-0 Prev/Next footer bar —
+     same offset ReadingHub.jsx used, tuned for the same bar. */
+  bottom: calc(78px + env(safe-area-inset-bottom));
+  z-index: 70; /* above EduTalk's own idle fab (60), below Live Coach's own live overlay (80) */
+  display: flex;
+  flex-direction: column; /* DOM order intro -> Live Coach -> EduTalk = visual top -> bottom */
+  align-items: flex-end;
+  gap: 10px;
+  pointer-events: none; /* re-enabled per-child so the gap between buttons stays click-through */
+}
+
+@media (min-width: 1024px) {
+  .companion-rail { bottom: calc(20px + env(safe-area-inset-bottom)); }
+}
+
+/* ── Discovery hint — once per device, auto-disappears, nothing to dismiss ── */
+.companion-rail__intro {
+  pointer-events: none;
+  max-width: 210px;
+  padding: 9px 12px;
+  border-radius: 14px;
+  background: linear-gradient(155deg, rgba(26,18,38,0.96) 0%, rgba(40,26,60,0.96) 100%);
+  border: 1px solid rgba(212,168,67,0.45);
+  box-shadow: 0 10px 28px rgba(8,5,15,0.5);
+  color: #F4EAD0;
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: companion-rail-intro-in 220ms ease-out both;
+}
+.companion-rail__intro-title { font-size: 11.5px; font-weight: 700; }
+.companion-rail__intro-sub { font-size: 10.5px; font-weight: 500; color: rgba(244,234,208,0.68); }
+@keyframes companion-rail-intro-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .companion-rail__intro { animation: none; }
+}
+
+/* ── Buttons ────────────────────────────────────────────────────────── */
+.companion-rail__btn {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px 8px 9px;
+  border-radius: 999px;
+  color: #F4EAD0;
+  background: linear-gradient(155deg, rgba(26,18,38,0.92) 0%, rgba(40,26,60,0.92) 100%);
+  border: 1px solid rgba(212,168,67,0.4);
+  box-shadow: 0 8px 20px rgba(8,5,15,0.4), inset 0 1px 0 rgba(255,255,255,0.07);
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  cursor: pointer;
+  transition: box-shadow 160ms ease, border-color 160ms ease;
+}
+.companion-rail__btn:hover,
+.companion-rail__btn:focus-visible {
+  border-color: rgba(212,168,67,0.65);
+  box-shadow: 0 10px 26px rgba(8,5,15,0.5), inset 0 1px 0 rgba(255,255,255,0.09);
+}
+.companion-rail__btn:active { transform: scale(0.98); }
+.companion-rail__btn[data-active="true"] {
+  border-color: rgba(111,227,184,0.55);
+}
+
+.companion-rail__icon {
+  position: relative;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+}
+.companion-rail__btn[data-kind="livecoach"] .companion-rail__icon { color: #FFE19A; }
+.companion-rail__btn[data-kind="edutalk"] .companion-rail__icon { color: #C9E7DD; }
+.companion-rail__btn[data-active="true"] .companion-rail__icon { color: #6FE3B8; }
+
+.companion-rail__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  text-align: left;
+}
+.companion-rail__title {
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.companion-rail__title-compact { display: none; }
+.companion-rail__sub {
+  font-size: 10px;
+  font-weight: 500;
+  color: rgba(244,234,208,0.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 130px;
+}
+
+/* ── Pulses — subtle, distinct per module, never a generic mic hint ──── */
+.companion-rail__pulse {
+  position: absolute;
+  inset: -3px;
+  border-radius: 999px;
+  border: 1.5px solid transparent;
+  opacity: 0;
+}
+/* Live Coach, available (idle) — a more noticeable but still elegant
+   soft outer ring that expands and fades, every ~2.8s. */
+.companion-rail__btn[data-kind="livecoach"][data-active="false"] .companion-rail__pulse {
+  border-color: rgba(255,225,154,0.55);
+  animation: companion-rail-pulse-coach 2.8s ease-out infinite;
+}
+/* EduTalk — a very subtle breathing glow, 3s cycle, low amplitude. */
+.companion-rail__btn[data-kind="edutalk"][data-active="false"] .companion-rail__pulse {
+  border-color: rgba(201,231,221,0.45);
+  animation: companion-rail-pulse-talk 3s ease-in-out infinite;
+}
+/* Either module actively engaged — a calmer, faster "in progress" pulse,
+   distinct from the idle "available" invitations above. */
+.companion-rail__btn[data-active="true"] .companion-rail__pulse {
+  border-color: rgba(111,227,184,0.7);
+  animation: companion-rail-pulse-active 1.6s ease-in-out infinite;
+}
+@keyframes companion-rail-pulse-coach {
+  0%   { transform: scale(0.85); opacity: 0.55; }
+  70%  { transform: scale(1.35); opacity: 0; }
+  100% { transform: scale(1.35); opacity: 0; }
+}
+@keyframes companion-rail-pulse-talk {
+  0%, 100% { transform: scale(0.92); opacity: 0.2; }
+  50%      { transform: scale(1.06); opacity: 0.4; }
+}
+@keyframes companion-rail-pulse-active {
+  0%, 100% { transform: scale(1); opacity: 0.5; }
+  50%      { transform: scale(1.15); opacity: 0.85; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .companion-rail__pulse { animation: none !important; }
+}
+
+/* ── Small-screen compacting — only once the first-run discovery moment
+   has already happened, never on a student's first encounter. ────────── */
+@media (max-width: 360px) {
+  .companion-rail[data-intro-done="true"] .companion-rail__title { display: none; }
+  .companion-rail[data-intro-done="true"] .companion-rail__title-compact { display: inline; font-size: 12px; font-weight: 700; }
+  .companion-rail[data-intro-done="true"] .companion-rail__sub { display: none; }
+  .companion-rail[data-intro-done="true"] .companion-rail__btn { padding: 7px 11px 7px 8px; }
+}

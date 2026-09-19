@@ -1,0 +1,1200 @@
+"""video_library_tools.py — Video Library backend: lesson metadata +
+backend-owned purchase/entitlement service.
+
+Architecturally independent from Books (per explicit product direction):
+this module never imports book_factory_*.py, never touches db.books, and
+the Books purchase mechanism (client-driven GAS + Google Form, see
+src/eduhub/pages/library/books/{purchaseService,unlocksService}.js in the
+frontend repo) is completely untouched by this file. Video Library reuses
+only genuinely shared platform infrastructure: the GAS points/treasury
+convention (via the isolated video_library_points_adapter.py, mirroring
+voice_treasure_points_adapter.py's proven pattern) and the existing
+Universal Synchronization Engine (sync_schema.py, referenced by `syncId`,
+never re-embedded).
+
+Two collections, both owned exclusively by this module:
+  video_lessons    — metadata (title, price, tier, syncId reference, status)
+  video_purchases  — the ONLY record of ownership. Primary-keyed by a
+                     deterministic `{studentId}::{lessonId}` id, which makes
+                     more-than-one purchase record per (student, lesson)
+                     pair structurally impossible — not merely unlikely.
+
+Purchase state machine (mirrors voice_treasure_entry_tools.py's proven,
+already-production state graph):
+    created -> initiating (atomic claim, exactly one concurrent
+               request wins) -> succeeded | failed | reconcile
+`succeeded` is the only state video_schema.is_owned() treats as owned.
+Ambiguous GAS outcomes land in `reconcile` and are NEVER auto-resolved —
+an admin route is the only way out of that state, matching this
+codebase's own established Voice Treasure/CamRapidPay reconciliation
+discipline.
+
+Backend is the sole source of truth throughout: ownership is decided by
+reading video_purchases, never by trusting anything the frontend sends.
+"""
+from __future__ import annotations
+
+import asyncio
+import datetime as _dt
+import hashlib
+import logging
+import os
+import secrets
+
+from fastapi import Body, Depends, File, Form, HTTPException, UploadFile
+
+import video_library_points_adapter as points
+import video_library_coupon_tools as coupon_tools
+import video_library_restricted_points as restricted_points
+import sync_studio_tools
+import video_render_tools
+from video_schema import (
+    RETRYABLE_STATES,
+    build_bookmark_record,
+    build_progress_record,
+    build_purchase_record,
+    build_video_lesson,
+    is_owned,
+    validate_video_lesson,
+)
+
+logger = logging.getLogger("eduhub.video_library")
+
+LESSONS_COLL = "video_lessons"
+PURCHASES_COLL = "video_purchases"
+PROGRESS_COLL = "video_progress"
+BOOKMARKS_COLL = "video_bookmarks"
+NOTES_COLL = "video_notes"
+
+ALLOWED_THUMBNAIL_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024
+
+
+def _utcnow_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _purchase_key(student_id: str, lesson_id: str) -> str:
+    return f"{student_id}::{lesson_id}"
+
+
+class VideoLibraryError(Exception):
+    def __init__(self, code: str, message: str = "", http_status: int = 400) -> None:
+        super().__init__(message or code)
+        self.code = code
+        self.message = message or code
+        self.http_status = http_status
+
+
+async def ensure_video_library_indexes(db) -> None:
+    await db[LESSONS_COLL].create_index("lessonId", unique=True)
+    await db[LESSONS_COLL].create_index("status")
+    await db[LESSONS_COLL].create_index([("status", 1), ("category", 1)])
+    await db[LESSONS_COLL].create_index([("status", 1), ("difficulty", 1)])
+    await db[PURCHASES_COLL].create_index("purchaseId", unique=True)
+    await db[PURCHASES_COLL].create_index([("studentId", 1), ("lessonId", 1)])
+    await db[PROGRESS_COLL].create_index([("studentId", 1), ("lessonId", 1)])
+    await db[PROGRESS_COLL].create_index([("studentId", 1), ("updatedAt", -1)])
+    await db[BOOKMARKS_COLL].create_index([("studentId", 1), ("lessonId", 1)])
+    await db[BOOKMARKS_COLL].create_index([("studentId", 1), ("createdAt", -1)])
+    await db[NOTES_COLL].create_index([("studentId", 1), ("lessonId", 1)])
+    logger.info("video_library_tools: indexes ready")
+
+
+# ── Lesson metadata (admin, Video Factory) ─────────────────────────────────
+async def create_video_lesson(db, *, title: str, price: int, created_by: str, **kwargs) -> dict:
+    if not str(title or "").strip():
+        raise VideoLibraryError("invalid_lesson", "title must not be blank", 400)
+    try:
+        doc = build_video_lesson(title=title, price=price, created_by=created_by, created_at=_utcnow_iso(), **kwargs)
+    except (ValueError, TypeError) as exc:
+        raise VideoLibraryError("invalid_lesson", str(exc), 400)
+    ok, errors = validate_video_lesson(doc)
+    if not ok:
+        raise VideoLibraryError("invalid_lesson", "; ".join(errors), 400)
+    await db[LESSONS_COLL].insert_one(dict(doc))
+    doc.pop("_id", None)
+    return doc
+
+
+async def get_video_lesson(db, lesson_id: str) -> dict | None:
+    return await db[LESSONS_COLL].find_one({"lessonId": lesson_id}, {"_id": 0})
+
+
+async def list_video_lessons(
+    db, *, status: str | None = None, category: str | None = None, difficulty: str | None = None,
+) -> list[dict]:
+    """Discovery filters (category/difficulty) power the standalone
+    dashboard's category rows and level tabs — additive query params, never
+    a second listing function."""
+    query: dict = {}
+    if status:
+        query["status"] = status
+    if category:
+        query["category"] = category
+    if difficulty:
+        query["difficulty"] = difficulty
+    cursor = db[LESSONS_COLL].find(query, {"_id": 0}).sort([("createdAt", -1)])
+    return await cursor.to_list(length=500)
+
+
+async def update_video_lesson(db, lesson_id: str, updates: dict) -> dict:
+    existing = await get_video_lesson(db, lesson_id)
+    if not existing:
+        raise VideoLibraryError("lesson_not_found", f"no lesson {lesson_id!r}", 404)
+    safe_updates = {k: v for k, v in updates.items() if k in (
+        "title", "subtitle", "thumbnailUrl", "price", "tier", "syncId", "mediaRef", "durationSec", "status",
+        "instructor", "category", "difficulty", "cefrLevel", "estimatedStudyMinutes", "featured",
+        "description", "learning", "tags", "teleprompterConfig",
+    )}
+    if "teleprompterConfig" in safe_updates:
+        from video_schema import default_teleprompter_config
+        cfg = safe_updates["teleprompterConfig"]
+        if not isinstance(cfg, dict):
+            raise VideoLibraryError("invalid_lesson", "teleprompterConfig must be an object", 400)
+        base = {**default_teleprompter_config(), **(existing.get("teleprompterConfig") or {})}
+        safe_updates["teleprompterConfig"] = {k: cfg.get(k, base[k]) for k in base}
+    merged = {**existing, **safe_updates}
+    ok, errors = validate_video_lesson(merged)
+    if not ok:
+        raise VideoLibraryError("invalid_lesson", "; ".join(errors), 400)
+
+    # Publish gate — the author workflow's final step. A lesson cannot go
+    # live without playable media; and once its synchronization has real
+    # alignment data, that data must be APPROVED in the Review Studio first
+    # (spec: "Publishing should use the approved version"). A lesson whose
+    # alignment is still pending/failed may publish (graceful sync-pending
+    # playback is a player feature), but never an unreviewed completed
+    # transcript.
+    if safe_updates.get("status") == "published" and existing.get("status") != "published":
+        if not merged.get("mediaRef"):
+            raise VideoLibraryError("no_media", "upload this lesson's video/audio before publishing", 409)
+        if merged.get("syncId"):
+            sync_doc = await sync_studio_tools.get_sync_document(db, merged["syncId"])
+            if sync_doc and sync_doc.get("alignmentStatus") == "complete" \
+                    and sync_doc.get("reviewStatus") != "approved":
+                raise VideoLibraryError(
+                    "sync_not_approved",
+                    "approve this lesson's synchronization in the Review Studio before publishing",
+                    409,
+                )
+    safe_updates["revision"] = int(existing.get("revision", 1)) + 1
+    await db[LESSONS_COLL].update_one({"lessonId": lesson_id}, {"$set": safe_updates})
+    merged["revision"] = safe_updates["revision"]
+    return merged
+
+
+async def _retire_media(db, *, media_ref: str | None, sync_id: str | None) -> None:
+    """2026-09 (Video Factory surgical bug-fix pass, §2e/4e) — best-effort
+    cleanup for a mediaRef/syncId a lesson no longer points to (replaced,
+    detached, or the lesson itself deleted). NEVER raises and never
+    blocks the caller's own Mongo-side action, which has already
+    committed by the time this runs — a lingering orphaned object is a
+    cleanup concern, not a correctness one, exactly matching assessment_
+    tools.py's `_delete_media_from_r2` posture. The media bucket is
+    constructed INSIDE this function's own try/except (not passed in by
+    the caller) so that even a bucket-construction failure can never
+    propagate out and break the delete/detach action that already
+    succeeded — only the best-effort cleanup is skipped.
+
+    Ownership-respecting reference count: this module owns `video_lessons`
+    and queries it directly; sync_studio_tools.py owns `chapter_sync` and
+    is asked (never queried directly) whether it still references the
+    same mediaRef. Content-hash dedup (sync_studio_tools.create_sync_
+    from_upload) means two independent documents CAN legitimately share
+    one storage object — the object is deleted only when NEITHER
+    collection references it any longer."""
+    if not sync_id and not media_ref:
+        return
+    try:
+        media_bucket = sync_studio_tools.get_media_bucket(db)
+        if sync_id:
+            # The chapter_sync document itself is retired unconditionally
+            # (it's Video Library's own, now-superseded row — "latest
+            # wins", per sync_studio_tools.py's own documented binding
+            # model, so an old one has no further purpose). Its mediaRef
+            # is used below if the caller didn't already have one.
+            freed_ref = await sync_studio_tools.delete_chapter_sync_document(db, sync_id)
+            media_ref = media_ref or freed_ref
+        if not media_ref:
+            return
+        still_referenced = (
+            await sync_studio_tools.is_media_referenced_in_chapter_sync(db, media_ref)
+            or await db[LESSONS_COLL].find_one({"mediaRef": media_ref}, {"_id": 1}) is not None
+        )
+        if still_referenced:
+            logger.info("video_library: mediaRef still referenced elsewhere, storage object kept ref=%s", media_ref)
+            return
+        deleted = await sync_studio_tools.delete_media_object(media_ref, media_bucket)
+        if not deleted:
+            logger.critical(
+                "video_library: media retired from Mongo but its storage object "
+                "(ref=%s) could NOT be confirmed deleted — manual cleanup needed", media_ref,
+            )
+    except Exception:  # noqa: BLE001
+        logger.critical("video_library: unexpected error retiring media ref=%s sync_id=%s — manual cleanup needed",
+                         media_ref, sync_id)
+
+
+async def attach_lesson_media(
+    db, lesson_id: str, *, raw: bytes, declared_content_type: str, media_bucket, uploaded_by: str = "",
+) -> dict:
+    """Upload a lesson's video/audio and bind the resulting syncId AND
+    mediaRef onto it. Reuses sync_studio_tools.create_sync_from_upload —
+    the SAME storage validation, R2-first/GridFS-fallback, and canonical
+    schema Books uses — via its public function, never by touching the
+    chapter_sync collection directly (that stays exclusively owned by
+    sync_studio_tools.py, per tools/check_collection_ownership.py).
+    `owner_ref` (not `slug`/`chapter_index`) is how this product binds to
+    the shared, provider-neutral Universal Synchronization Engine without
+    either module knowing about the other's domain.
+
+    `mediaRef` is denormalized onto the lesson itself (not fetched from
+    the sync document at playback time) so video playback never depends
+    on sync_schema.is_servable_to_students()'s alignment-readiness gate —
+    see build_video_lesson()'s docstring for why that gate must stay
+    scoped to captions/highlighting only.
+
+    2026-09 — a re-upload (replacing existing media) now retires the
+    PREVIOUS media only AFTER the lesson has been successfully repointed
+    at the new one — never before, so a failure while cleaning up the old
+    media can never leave the lesson without a working mediaRef/syncId."""
+    lesson = await get_video_lesson(db, lesson_id)
+    if not lesson:
+        raise VideoLibraryError("lesson_not_found", f"no lesson {lesson_id!r}", 404)
+    previous_media_ref = lesson.get("mediaRef")
+    previous_sync_id = lesson.get("syncId")
+
+    try:
+        sync_doc = await sync_studio_tools.create_sync_from_upload(
+            db, raw=raw, declared_content_type=declared_content_type, media_bucket=media_bucket,
+            owner_ref=f"video_lesson:{lesson_id}", uploaded_by=uploaded_by,
+        )
+    except sync_studio_tools.SyncStudioError as exc:
+        raise VideoLibraryError(exc.code, exc.message, exc.http_status) from exc
+
+    updated = await update_video_lesson(
+        db, lesson_id, {"syncId": sync_doc["syncId"], "mediaRef": sync_doc["mediaRef"]},
+    )
+
+    if previous_sync_id and previous_sync_id != sync_doc["syncId"]:
+        await _retire_media(db, media_ref=previous_media_ref, sync_id=previous_sync_id)
+
+    return updated
+
+
+async def detach_lesson_media(db, lesson_id: str) -> dict:
+    """Media delete — clears mediaRef/syncId/contentType/pipeline/duration
+    so a fresh upload starts clean. Refused while published (students would
+    lose a playable lesson in one step — unpublish first).
+
+    2026-09 — also retires the underlying storage object (and the now-
+    orphaned chapter_sync document) once nothing else references it —
+    see _retire_media. Runs AFTER the Mongo clear commits, matching
+    assessment_tools.py's own delete-then-best-effort-cleanup ordering."""
+    lesson = await get_video_lesson(db, lesson_id)
+    if not lesson:
+        raise VideoLibraryError("lesson_not_found", f"no lesson {lesson_id!r}", 404)
+    if lesson.get("status") == "published":
+        raise VideoLibraryError("lesson_published", "unpublish this lesson before removing its media", 409)
+    media_ref = lesson.get("mediaRef")
+    sync_id = lesson.get("syncId")
+    await db[LESSONS_COLL].update_one(
+        {"lessonId": lesson_id},
+        {"$set": {"mediaRef": None, "syncId": None, "durationSec": 0.0},
+         "$unset": {"pipeline": "", "contentType": "", "learning": ""}},
+    )
+    logger.info("video_library: media detached lessonId=%s", lesson_id)
+    await _retire_media(db, media_ref=media_ref, sync_id=sync_id)
+    return await get_video_lesson(db, lesson_id)
+
+
+async def delete_video_lesson(db, lesson_id: str) -> None:
+    """Video Factory delete. Published lessons must be unpublished first —
+    a lesson students can currently see/purchase can never silently vanish
+    in one step. Purchase and progress records are deliberately RETAINED
+    (they are the financial audit trail; entitlement history outlives the
+    catalog entry, matching the codebase's reconciliation discipline).
+
+    2026-09 — also retires the underlying storage object (and the now-
+    orphaned chapter_sync document) once nothing else references it —
+    see _retire_media. Runs AFTER the lesson document is deleted."""
+    lesson = await get_video_lesson(db, lesson_id)
+    if not lesson:
+        raise VideoLibraryError("lesson_not_found", f"no lesson {lesson_id!r}", 404)
+    if lesson.get("status") == "published":
+        raise VideoLibraryError(
+            "lesson_published", "unpublish this lesson before deleting it", 409,
+        )
+    await db[LESSONS_COLL].delete_one({"lessonId": lesson_id})
+    logger.info("video_library: lesson deleted lessonId=%s", lesson_id)
+    await _retire_media(db, media_ref=lesson.get("mediaRef"), sync_id=lesson.get("syncId"))
+
+
+# ── Ownership (the ONLY function anything should call to decide access) ────
+async def get_purchase(db, student_id: str, lesson_id: str) -> dict | None:
+    return await db[PURCHASES_COLL].find_one({"_id": _purchase_key(student_id, lesson_id)}, {"_id": 0})
+
+
+async def student_owns_lesson(db, student_id: str, lesson_id: str) -> bool:
+    return is_owned(await get_purchase(db, student_id, lesson_id))
+
+
+async def list_my_purchases(db, student_id: str) -> list[dict]:
+    """Every purchase record for this student, newest first — powers a
+    "My Lessons" (purchased-only) view. Includes every state (not just
+    succeeded) so a student can see a `reconcile`/`failed` attempt too,
+    not just their successful unlocks."""
+    cursor = db[PURCHASES_COLL].find({"studentId": student_id}, {"_id": 0}).sort([("updatedAt", -1)])
+    return await cursor.to_list(length=200)
+
+
+async def list_reconcile_purchases(db) -> list[dict]:
+    """Admin-only. Every purchase currently parked in `reconcile` — the
+    ambiguous-GAS-outcome state that is NEVER auto-resolved (see this
+    module's own docstring). Enriches each record with the lesson's title
+    so an admin isn't resolving a queue of bare IDs."""
+    cursor = db[PURCHASES_COLL].find({"state": "reconcile"}, {"_id": 0}).sort([("updatedAt", 1)])
+    purchases = await cursor.to_list(length=200)
+    for p in purchases:
+        lesson = await get_video_lesson(db, p["lessonId"])
+        p["lessonTitle"] = (lesson or {}).get("title", "")
+    return purchases
+
+
+# ── Progress ("where did I leave off") ──────────────────────────────────────
+async def record_progress(db, *, student_id: str, lesson_id: str, position_sec: float, duration_sec: float) -> dict:
+    doc = build_progress_record(
+        student_id=student_id, lesson_id=lesson_id, position_sec=position_sec,
+        duration_sec=duration_sec, updated_at=_utcnow_iso(),
+    )
+    key = _purchase_key(student_id, lesson_id)  # same {studentId}::{lessonId} shape, different collection
+    await db[PROGRESS_COLL].update_one({"_id": key}, {"$set": doc}, upsert=True)
+    return doc
+
+
+async def get_progress(db, student_id: str, lesson_id: str) -> dict | None:
+    return await db[PROGRESS_COLL].find_one({"_id": _purchase_key(student_id, lesson_id)}, {"_id": 0})
+
+
+async def list_continue_watching(db, student_id: str) -> list[dict]:
+    """Lessons with real, saved progress that are not yet complete —
+    powers the dashboard's "Continue Learning" row. Never returns a lesson
+    the student hasn't actually started (no synthetic "recommended as
+    continue watching" — that's a different, unbuilt "Recommended" concern)."""
+    cursor = db[PROGRESS_COLL].find(
+        {"studentId": student_id, "completed": False}, {"_id": 0},
+    ).sort([("updatedAt", -1)])
+    return await cursor.to_list(length=50)
+
+
+# ── Bookmarks (saved lessons) ────────────────────────────────────────────
+async def toggle_bookmark(db, *, student_id: str, lesson_id: str) -> dict:
+    """Idempotent toggle. Same deterministic `{studentId}::{lessonId}` _id
+    convention as purchases/progress — one bookmark row per pair, ever."""
+    lesson = await get_video_lesson(db, lesson_id)
+    if not lesson or lesson.get("status") != "published":
+        raise VideoLibraryError("lesson_not_found", f"no published lesson {lesson_id!r}", 404)
+    key = _purchase_key(student_id, lesson_id)
+    existing = await db[BOOKMARKS_COLL].find_one({"_id": key}, {"_id": 0})
+    if existing:
+        await db[BOOKMARKS_COLL].delete_one({"_id": key})
+        return {"bookmarked": False, "lessonId": lesson_id}
+    doc = {**build_bookmark_record(student_id=student_id, lesson_id=lesson_id, created_at=_utcnow_iso()), "_id": key}
+    await db[BOOKMARKS_COLL].update_one({"_id": key}, {"$setOnInsert": doc}, upsert=True)
+    return {"bookmarked": True, "lessonId": lesson_id}
+
+
+async def list_bookmarks(db, student_id: str) -> list[dict]:
+    cursor = db[BOOKMARKS_COLL].find({"studentId": student_id}, {"_id": 0}).sort([("createdAt", -1)])
+    return await cursor.to_list(length=200)
+
+
+# ── Study notes (backend-owned, cross-device — replaces the earlier
+#    per-device localStorage notes, which the product spec disallows) ─────
+async def get_note(db, student_id: str, lesson_id: str) -> dict | None:
+    return await db[NOTES_COLL].find_one({"_id": _purchase_key(student_id, lesson_id)}, {"_id": 0})
+
+
+async def save_note(db, *, student_id: str, lesson_id: str, text: str) -> dict:
+    doc = {
+        "studentId": student_id,
+        "lessonId": lesson_id,
+        "text": str(text or "")[:20000],
+        "updatedAt": _utcnow_iso(),
+    }
+    await db[NOTES_COLL].update_one(
+        {"_id": _purchase_key(student_id, lesson_id)}, {"$set": doc}, upsert=True,
+    )
+    return doc
+
+
+async def serialize_lesson_for_student(db, lesson: dict, student_id: str | None) -> dict:
+    """Backend-computed ownership flag — the frontend never decides this.
+    Free lessons (price<=0) are always "owned"; a paid lesson only exposes
+    its syncId AND mediaRef (the actual protected content — transcript
+    reference and the playable video file itself) once owned — everything
+    else (title, thumbnail, price, instructor, category) is always visible
+    so a student can browse and decide whether to purchase.
+
+    AI Narration track exposure mirrors the same discipline, with an
+    ADDITIONAL gate: `aiNarrationPublished` (set only by an explicit admin
+    action in video_narration_tools.py — never automatically, per "human
+    approval is required, never auto-publish AI-generated narration").
+    `aiNarrationAvailable` is the one clean boolean the frontend needs;
+    the raw `aiNarrationSyncId`/`aiNarrationMediaRef`/`aiNarrationPublished`
+    fields never leave this function for an unowned or unpublished lesson —
+    a student never even learns a narration track exists yet."""
+    price = int(lesson.get("price") or 0)
+    owned = price <= 0 or (bool(student_id) and await student_owns_lesson(db, student_id, lesson["lessonId"]))
+    out = {**lesson, "owned": owned}
+    if not owned:
+        out.pop("syncId", None)
+        out.pop("mediaRef", None)
+
+    narration_available = owned and bool(out.get("aiNarrationPublished"))
+    out["aiNarrationAvailable"] = narration_available
+    out.pop("aiNarrationPublished", None)
+    if not narration_available:
+        out.pop("aiNarrationSyncId", None)
+        out.pop("aiNarrationMediaRef", None)
+        out.pop("aiNarrationDurationSec", None)
+        out.pop("aiNarrationMasterMediaRef", None)
+    else:
+        # A rendered final master (real embedded-audio MP4) is an OPTIONAL
+        # upgrade over the audio-only additive track — most lessons won't
+        # have one, so this stays honestly False rather than ever implying
+        # a master exists when only the additive track was published.
+        out["aiNarrationMasterAvailable"] = bool(out.get("aiNarrationMasterMediaRef"))
+        if not out["aiNarrationMasterAvailable"]:
+            out.pop("aiNarrationMasterMediaRef", None)
+    return out
+
+
+# ── §4 Khmer/English bilingual "purchase successful" push ───────────────────
+# Same established "points"-flavored bilingual convention as
+# video_library_coupon_tools.py's redemption push — see that module's own
+# comment for the honesty caveat on the newly-composed (not native-speaker-
+# reviewed) phrasing. Kept as a pure function so its wording is unit-
+# testable without touching any notification-sending machinery.
+def _compose_purchase_notification(lesson_title: str, *, restricted_used: int, gas_used: int) -> tuple[str, str]:
+    title = "🎬 បានទិញវីដេអូជោគជ័យ! / Video Purchase Successful!"
+    title_line = f'"{lesson_title}"'
+    if restricted_used and gas_used:
+        body = (
+            f"អ្នកបានទិញមេរៀន {title_line} ដោយចំណាយ {restricted_used} ពិន្ទុវីដេអូ និង {gas_used} ពិន្ទុទូទៅ ✨\n"
+            f'You purchased "{lesson_title}" using {restricted_used} Video points + {gas_used} general points.'
+        )
+    elif restricted_used:
+        body = (
+            f"អ្នកបានទិញមេរៀន {title_line} ដោយចំណាយ {restricted_used} ពិន្ទុវីដេអូ ✨\n"
+            f'You purchased "{lesson_title}" using {restricted_used} Video points.'
+        )
+    else:
+        body = (
+            f"អ្នកបានទិញមេរៀន {title_line} ដោយចំណាយ {gas_used} ពិន្ទុ ✨\n"
+            f'You purchased "{lesson_title}" for {gas_used} points.'
+        )
+    return title, body
+
+
+async def _send_purchase_push(fan_out_push, student_id: str, lesson_title: str, *,
+                               restricted_used: int, gas_used: int, purchase_key: str) -> None:
+    if not callable(fan_out_push):
+        return
+    title, body = _compose_purchase_notification(lesson_title, restricted_used=restricted_used, gas_used=gas_used)
+    try:
+        await fan_out_push(
+            {"studentId": student_id}, title=title, body=body, url="/library/video",
+            category="vouchers", dedupe_key=f"video_library_purchase:{purchase_key}",
+        )
+    except Exception as exc:  # noqa: BLE001 — a push failure must never affect a purchase that already succeeded
+        logger.warning("video_library: purchase push notification failed key=%s: %s", purchase_key, exc)
+
+
+# ── Purchase state machine ──────────────────────────────────────────────────
+async def initiate_purchase(
+    db, *, student_id: str, lesson_id: str, password: str,
+    coupon_code: str | None = None, fan_out_push=None,
+) -> dict:
+    lesson = await get_video_lesson(db, lesson_id)
+    if not lesson or lesson.get("status") != "published":
+        raise VideoLibraryError("lesson_not_found", f"no published lesson {lesson_id!r}", 404)
+
+    original_price = int(lesson.get("price") or 0)
+    if original_price <= 0:
+        raise VideoLibraryError("free_lesson", "this lesson is free — no purchase needed", 400)
+
+    # (§1) percent-type Video Library coupon — read-only validation BEFORE
+    # the purchase state machine even starts, so a bad/expired/already-used
+    # code is rejected cheaply. The coupon's use is only ever RECORDED
+    # after the purchase actually succeeds (see the OUTCOME_OK branch
+    # below) — a failed/ambiguous purchase must never burn the code.
+    coupon_doc = None
+    normalized_coupon_code = coupon_tools.normalize_code(coupon_code) if coupon_code else ""
+    if normalized_coupon_code:
+        coupon_doc, coupon_reason = await coupon_tools.find_valid_percent_coupon(
+            db, normalized_coupon_code, student_id,
+        )
+        if not coupon_doc:
+            raise VideoLibraryError(
+                "invalid_coupon",
+                coupon_tools._FRIENDLY_MESSAGES.get(coupon_reason, "This coupon could not be applied."),
+                400,
+            )
+    price = (
+        coupon_tools.apply_percent_discount(original_price, coupon_doc)
+        if coupon_doc else original_price
+    )
+
+    key = _purchase_key(student_id, lesson_id)
+    now = _utcnow_iso()
+
+    # (a) idempotent seed — never overwrites an existing record. `price` is
+    #     the FINAL (possibly coupon-discounted) amount actually charged
+    #     this attempt; `originalPrice`/`couponCode` are carried alongside
+    #     purely for admin/student transparency, never re-derived later.
+    seed = {
+        **build_purchase_record(student_id=student_id, lesson_id=lesson_id, price=price, created_at=now),
+        "_id": key,
+        "originalPrice": original_price,
+        "couponCode": normalized_coupon_code or None,
+        "restrictedUsed": 0,
+    }
+    await db[PURCHASES_COLL].update_one({"_id": key}, {"$setOnInsert": seed}, upsert=True)
+
+    # (b) atomic claim — exactly one concurrent request transitions this
+    #     purchase out of a retryable state. Every other concurrent caller
+    #     gets a clean, non-mutating rejection below.
+    # No return_document kwarg — matches this codebase's own established
+    # atomic-claim convention (camrapidpay_payment_tools.py): the default
+    # pre-image return value is only used for a None-check (did a matching
+    # document exist to claim), never read for its field values. The
+    # current state is always re-fetched via get_purchase() when needed.
+    claimed = await db[PURCHASES_COLL].find_one_and_update(
+        {"_id": key, "state": {"$in": RETRYABLE_STATES}},
+        {"$set": {"state": "initiating", "updatedAt": now},
+         "$push": {"stateHistory": {"state": "initiating", "at": now}}},
+    )
+    if claimed is None:
+        current = await db[PURCHASES_COLL].find_one({"_id": key}, {"_id": 0})
+        current_state = (current or {}).get("state")
+        if current_state == "succeeded":
+            raise VideoLibraryError("already_owned", "you already own this lesson", 409)
+        if current_state == "initiating":
+            raise VideoLibraryError("in_progress", "a purchase attempt is already in progress", 409)
+        raise VideoLibraryError(
+            "needs_reconciliation",
+            "a prior purchase attempt could not be confirmed and is pending admin review", 409,
+        )
+
+    # (§2.4) RESTRICTED-FIRST SPEND ORDERING. Video Library restricted
+    # points (credited by video_library_coupon_tools.py's "points" coupon
+    # type — a genuinely separate Mongo ledger, see
+    # video_library_restricted_points.py's own module docstring for why it
+    # is NOT part of the shared GAS balance or wallet_service.py) are
+    # spent FIRST, so they never sit unspendable. Only whatever remains of
+    # the price after restricted funds are exhausted is charged against
+    # the real GAS balance — this is the ONLY place in the app that reads
+    # or spends this restricted balance; no other feature's points-
+    # spending path is touched by this addition at all.
+    #
+    # Idempotency key is per-ATTEMPT (a fresh random nonce — NOT derived
+    # from `now`, which is only second-precision and can genuinely collide
+    # across two attempts claimed within the same second, e.g. a fast
+    # automated retry; confirmed by this round's own test suite catching
+    # exactly that collision before this fix), not per-purchase-key: a
+    # REJECTED attempt refunds its own restricted debit below and returns
+    # the purchase to "failed" (RETRYABLE_STATES includes "failed" —
+    # video_schema.py), so a genuine retry must be able to debit
+    # restricted funds again, fresh — a timestamp-only key would make that
+    # retry's debit silently look like a replay of the FIRST (already-
+    # refunded) attempt and skip re-debiting entirely.
+    restricted_balance = await restricted_points.get_balance(db, student_id)
+    restricted_used = min(restricted_balance, price)
+    gas_amount = price - restricted_used
+    restricted_debit_key = f"{key}:{secrets.token_hex(8)}:restricted-debit"
+    restricted_debit_applied = False
+    if restricted_used > 0:
+        try:
+            await restricted_points.debit(
+                db, student_id, restricted_used,
+                source="video_purchase", source_ref=lesson_id,
+                idempotency_key=restricted_debit_key,
+            )
+            restricted_debit_applied = True
+        except restricted_points.InsufficientRestrictedFunds:
+            # Race: balance changed between the read above and the debit
+            # (e.g. spent by a concurrent request against another lesson).
+            # Fall back to charging the FULL price to the real GAS balance
+            # — never guess a partial amount, never block the purchase for
+            # a restricted-balance race the student can't see or control.
+            restricted_used = 0
+            gas_amount = price
+        if restricted_used > 0:
+            await db[PURCHASES_COLL].update_one(
+                {"_id": key}, {"$set": {"restrictedUsed": restricted_used}},
+            )
+
+    # (c) the ONE real GAS call for this attempt — only for whatever
+    #     remains after restricted funds. Skipped entirely (never called)
+    #     when restricted points already cover the full price.
+    if gas_amount > 0:
+        result = await points.debit_purchase(student_id, password, gas_amount)
+    else:
+        result = {"outcome": points.OUTCOME_OK, "reason": ""}
+    outcome = result.get("outcome")
+    ts = _utcnow_iso()
+
+    if outcome == points.OUTCOME_OK:
+        post_balance = None
+        if gas_amount > 0:
+            post_balance, _ = await points.get_authoritative_balance(student_id, password)
+        await db[PURCHASES_COLL].update_one(
+            {"_id": key, "state": "initiating"},
+            {"$set": {"state": "succeeded", "pointsAfter": post_balance, "updatedAt": ts},
+             "$push": {"stateHistory": {"state": "succeeded", "at": ts}}},
+        )
+        logger.info(
+            "video_library: purchase succeeded student=%s lesson=%s restricted_used=%s gas_used=%s coupon=%s",
+            student_id, lesson_id, restricted_used, gas_amount, normalized_coupon_code or None,
+        )
+        if coupon_doc:
+            await coupon_tools.finalize_percent_coupon_use(
+                db, normalized_coupon_code, student_id, lesson_id=lesson_id,
+                original_price=original_price, discounted_price=price,
+            )
+        await _send_purchase_push(
+            fan_out_push, student_id, lesson.get("title") or "your lesson",
+            restricted_used=restricted_used, gas_used=gas_amount, purchase_key=key,
+        )
+    elif outcome == points.OUTCOME_REJECTED:
+        # Definitive failure — safe to retry (RETRYABLE_STATES includes
+        # "failed"). Any restricted points already debited for THIS
+        # attempt must be refunded so a retry starts with them available
+        # again — otherwise a rejected purchase would silently strand
+        # restricted points the student never actually spent.
+        if restricted_debit_applied:
+            await restricted_points.credit(
+                db, student_id, restricted_used,
+                source="video_purchase_refund", source_ref=lesson_id,
+                idempotency_key=f"{restricted_debit_key}:refund",
+            )
+        await db[PURCHASES_COLL].update_one(
+            {"_id": key, "state": "initiating"},
+            {"$set": {"state": "failed", "reason": result.get("reason"), "restrictedUsed": 0, "updatedAt": ts},
+             "$push": {"stateHistory": {"state": "failed", "at": ts}}},
+        )
+    else:  # OUTCOME_AMBIGUOUS — never guessed, never auto-retried.
+        # Deliberately NOT refunding any restricted debit here, symmetric
+        # with how the real GAS side is handled: we do not know whether
+        # the GAS debit actually applied, so we do not know whether this
+        # purchase actually succeeded either. `restrictedUsed` stays
+        # recorded on the purchase doc (set above) for admin
+        # reconciliation to see and decide — auto-refunding could
+        # double-spend restricted points if the purchase turns out to have
+        # succeeded after all. This is a real, open edge case — see this
+        # round's report.
+        await db[PURCHASES_COLL].update_one(
+            {"_id": key, "state": "initiating"},
+            {"$set": {"state": "reconcile", "reason": result.get("reason"), "updatedAt": ts},
+             "$push": {"stateHistory": {"state": "reconcile", "at": ts}}},
+        )
+        logger.warning("video_library: purchase AMBIGUOUS student=%s lesson=%s reason=%s", student_id, lesson_id, result.get("reason"))
+
+    return await get_purchase(db, student_id, lesson_id)
+
+
+async def admin_reconcile_purchase(db, student_id: str, lesson_id: str, *, resolution: str, actor: str) -> dict:
+    """Admin-only. `resolution` is "succeeded" (confirmed the debit DID
+    apply — e.g. verified via reconciliation_balance_probe or GAS ledger)
+    or "failed" (confirmed it did NOT apply — safe to let the student
+    retry). Only callable from a `reconcile` state."""
+    if resolution not in ("succeeded", "failed"):
+        raise VideoLibraryError("invalid_resolution", f"invalid resolution: {resolution!r}", 400)
+    key = _purchase_key(student_id, lesson_id)
+    purchase = await db[PURCHASES_COLL].find_one({"_id": key}, {"_id": 0})
+    if not purchase:
+        raise VideoLibraryError("purchase_not_found", "no purchase record", 404)
+    if purchase.get("state") != "reconcile":
+        raise VideoLibraryError("not_reconcilable", f"purchase is in state {purchase.get('state')!r}, not 'reconcile'", 409)
+
+    ts = _utcnow_iso()
+    audit = {"actor": actor, "resolution": resolution, "at": ts}
+    await db[PURCHASES_COLL].update_one(
+        {"_id": key},
+        {"$set": {"state": resolution, "updatedAt": ts, "adminReconciliation": audit},
+         "$push": {"stateHistory": {"state": resolution, "at": ts, "op": "admin_reconcile"}}},
+    )
+    return await get_purchase(db, student_id, lesson_id)
+
+
+# ── faststart backfill (2026-09, Video Factory surgical bug-fix pass,
+#    §2c/4b) — for lessons uploaded BEFORE remux_faststart existed. Manual-
+#    trigger only (an admin route below, never scheduled/automatic), dry-
+#    run by default, non-destructive: a fresh, separately content-
+#    addressed object is created and verified (same duration, same video
+#    frame count) BEFORE the lesson is ever repointed at it — the original
+#    object is left completely untouched if anything is inconclusive.
+#    NOT executed against any real data as part of this pass. ────────────
+def _sha256_of_file(path: str) -> str:
+    """Streaming (chunked) sha256 of an on-disk file — never reads the
+    whole file into one `bytes` object just to hash it, unlike the
+    hashlib.sha256(remuxed_bytes) this replaces (see
+    backfill_faststart_scan_lesson's 2026-09 OOM-fix comment)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+async def backfill_faststart_scan_lesson(db, lesson: dict, media_bucket, *, dry_run: bool = True) -> dict:
+    """Per-lesson faststart backfill. Returns a status row, never a bare
+    bool — an ambiguous outcome (couldn't read the media, couldn't parse
+    its box structure, couldn't verify a remux) is always its OWN honest
+    status, never coerced into "fine" or "fixed".
+
+    status is one of:
+      not_video | unreadable | already_fixed | needs_fix (dry_run only)
+      | fixed | remux_failed | verification_failed | store_failed
+    """
+    lesson_id = lesson.get("lessonId")
+    media_ref = lesson.get("mediaRef")
+    content_type = (lesson.get("contentType") or "").lower()
+    if not media_ref or "video" not in content_type:
+        return {"lessonId": lesson_id, "status": "not_video"}
+
+    import video_pipeline_tools as _pipeline  # lazy — avoids the module cycle noted elsewhere in this file
+    try:
+        raw, _ct = await _pipeline.load_media_bytes(db, media_bucket, media_ref)
+    except Exception as exc:  # noqa: BLE001
+        return {"lessonId": lesson_id, "status": "unreadable", "detail": f"{type(exc).__name__}: {exc}"}
+
+    # mp4_moov_before_mdat returns True when moov ALREADY comes first (the
+    # file is already fine) — do not rename this without re-checking every
+    # branch below; a prior version of this exact line stored the result
+    # directly into a variable named `needs_fix` without inverting it,
+    # silently swapping "already_fixed" and "needs_fix" for every lesson.
+    moov_already_first = video_render_tools.mp4_moov_before_mdat(raw)
+    if moov_already_first is None:
+        return {"lessonId": lesson_id, "status": "unreadable", "detail": "could not parse MP4 box structure"}
+    if moov_already_first:
+        return {"lessonId": lesson_id, "status": "already_fixed"}
+    if dry_run:
+        return {"lessonId": lesson_id, "status": "needs_fix"}
+
+    orig_duration = await video_render_tools.probe_container_duration_seconds(raw)
+    orig_frames = await video_render_tools.probe_video_frame_count(raw)
+
+    # 2026-09 (same production OOM fix as create_sync_from_upload — see its
+    # docstring): stream the remux output from disk instead of reading it
+    # into a second full-size `bytes` object that would coexist with
+    # `raw` (already a full in-memory copy of this — potentially large,
+    # pre-existing — lesson's media, from load_media_bytes above) for the
+    # rest of this function, including verification and upload.
+    remuxed_path = await video_render_tools.remux_faststart_to_file(raw, content_type)
+    if not remuxed_path:
+        return {"lessonId": lesson_id, "status": "remux_failed"}
+    try:
+        new_duration = await video_render_tools.probe_container_duration_seconds_from_path(remuxed_path)
+        new_frames = await video_render_tools.probe_video_frame_count_from_path(remuxed_path)
+        if None in (orig_duration, new_duration, orig_frames, new_frames):
+            return {"lessonId": lesson_id, "status": "verification_failed", "detail": "could not measure duration/frames"}
+        if abs(new_duration - orig_duration) > 0.5 or new_frames != orig_frames:
+            return {
+                "lessonId": lesson_id, "status": "verification_failed",
+                "detail": f"duration {orig_duration}s->{new_duration}s, frames {orig_frames}->{new_frames}",
+            }
+
+        content_hash = await asyncio.get_event_loop().run_in_executor(None, _sha256_of_file, remuxed_path)
+        key = f"sync-media/{content_hash}.mp4"
+        new_ref = await sync_studio_tools._upload_media_to_r2(
+            None, key, content_type, {"contentHash": content_hash, "backfill": "faststart"},
+            file_path=remuxed_path,
+        )
+        if not new_ref:
+            filename = f"{content_hash}.mp4"
+            new_ref = await sync_studio_tools._gridfs_ref_if_already_stored(media_bucket, filename)
+            if not new_ref:
+                try:
+                    with open(remuxed_path, "rb") as f:
+                        await media_bucket.upload_from_stream(
+                            filename, f, metadata={"contentType": content_type, "backfill": "faststart"},
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    return {"lessonId": lesson_id, "status": "store_failed", "detail": f"{type(exc).__name__}: {exc}"}
+                new_ref = f"gridfs://{sync_studio_tools.MEDIA_GRIDFS_BUCKET}/{filename}"
+    finally:
+        try:
+            os.remove(remuxed_path)
+        except OSError:
+            pass
+
+    old_media_ref = media_ref
+    sync_id = lesson.get("syncId")
+    await update_video_lesson(db, lesson_id, {"mediaRef": new_ref})
+    if sync_id:
+        await sync_studio_tools.update_chapter_sync_media_ref(db, sync_id, new_ref)
+    # Retire the old object only now that the lesson genuinely points
+    # somewhere else — never before, and never if this lesson is the only
+    # thing that changed sync_id would matter for _retire_media's
+    # reference check, which is why chapter_sync was updated above FIRST.
+    await _retire_media(db, media_ref=old_media_ref, sync_id=None)
+    return {"lessonId": lesson_id, "status": "fixed", "mediaRef": new_ref}
+
+
+async def backfill_faststart_scan_all(db, media_bucket, *, dry_run: bool = True, limit: int = 200) -> dict:
+    """Batchable/resumable scan: processes up to `limit` lessons per call
+    (an admin re-invokes with the same dry_run flag until `scanned <
+    limit`, i.e. nothing left) rather than trying to do an entire library
+    in one request. Never raises on a single lesson's failure — one bad
+    lesson is recorded in its own row and the scan continues."""
+    cursor = db[LESSONS_COLL].find({"contentType": {"$regex": "video"}}, {"_id": 0}).limit(limit)
+    rows = []
+    async for lesson in cursor:
+        try:
+            row = await backfill_faststart_scan_lesson(db, lesson, media_bucket, dry_run=dry_run)
+        except Exception as exc:  # noqa: BLE001
+            row = {"lessonId": lesson.get("lessonId"), "status": "skipped_error", "detail": f"{type(exc).__name__}: {exc}"}
+        rows.append(row)
+    summary: dict = {"scanned": len(rows)}
+    for row in rows:
+        summary[row["status"]] = summary.get(row["status"], 0) + 1
+    return {"dryRun": dry_run, "summary": summary, "lessons": rows}
+
+
+def register_video_library_routes(api, db, require_admin, require_student, *, fan_out_push=None) -> None:
+    """Mounts Video Library routes. Matches this codebase's
+    register_*_routes(api, db, ...) DI convention exactly.
+
+    The media GridFS bucket is resolved lazily via
+    sync_studio_tools.get_media_bucket(db) at each request-time usage site
+    below — a second handle onto the SAME underlying bucket
+    (sync_studio_tools.MEDIA_GRIDFS_BUCKET), sharing that module's cache
+    rather than constructing a second instance eagerly here. Eager
+    construction at this function's own synchronous, import-time call
+    site used to crash before any event loop existed — see
+    get_media_bucket()'s docstring. Streaming a Video Library asset back
+    out reuses sync_studio_tools.py's existing GET /api/sync/media/
+    {filename} route — no new streaming route needed here."""
+
+    def _raise(exc: VideoLibraryError):
+        raise HTTPException(status_code=exc.http_status, detail=exc.message)
+
+    # ── Video Factory (admin) ──────────────────────────────────────────
+    @api.post("/studio/video/lessons")
+    async def create_lesson_route(payload: dict = Body(...), admin=Depends(require_admin)):
+        try:
+            doc = await create_video_lesson(
+                db,
+                title=payload.get("title", ""),
+                price=int(payload.get("price", 0)),
+                created_by=getattr(admin, "email", ""),
+                subtitle=payload.get("subtitle", ""),
+                thumbnail_url=payload.get("thumbnailUrl", ""),
+                tier=payload.get("tier", "standard"),
+                sync_id=payload.get("syncId"),
+                duration_sec=float(payload.get("durationSec", 0.0)),
+                instructor=payload.get("instructor", ""),
+                category=payload.get("category") or None,
+                difficulty=payload.get("difficulty") or None,
+                cefr_level=payload.get("cefrLevel") or None,
+                estimated_study_minutes=int(payload.get("estimatedStudyMinutes", 0) or 0),
+                featured=bool(payload.get("featured", False)),
+                description=payload.get("description", ""),
+                tags=payload.get("tags") or [],
+                teleprompter_config=payload.get("teleprompterConfig") or None,
+            )
+        except VideoLibraryError as exc:
+            _raise(exc)
+        return {"ok": True, "lesson": doc}
+
+    @api.get("/studio/video/lessons")
+    async def list_lessons_admin_route(status: str = "", _admin=Depends(require_admin)):
+        docs = await list_video_lessons(db, status=status or None)
+        return {"lessons": docs}
+
+    @api.post("/video/lessons/{lesson_id}/progress")
+    async def progress_route(lesson_id: str, payload: dict = Body(...), student=Depends(require_student)):
+        student_id = getattr(student, "clean_id", "") or getattr(student, "student_id", "")
+        doc = await record_progress(
+            db, student_id=student_id, lesson_id=lesson_id,
+            position_sec=float(payload.get("positionSec", 0.0)),
+            duration_sec=float(payload.get("durationSec", 0.0)),
+        )
+        return {"ok": True, "progress": doc}
+
+    @api.get("/video/progress/mine")
+    async def my_continue_watching_route(all: str = "", student=Depends(require_student)):
+        """Default: incomplete lessons only (Continue Learning). `?all=1`
+        returns every progress record newest-first (Recently Watched)."""
+        student_id = getattr(student, "clean_id", "") or getattr(student, "student_id", "")
+        if all:
+            cursor = db[PROGRESS_COLL].find({"studentId": student_id}, {"_id": 0}).sort([("updatedAt", -1)])
+            docs = await cursor.to_list(length=100)
+        else:
+            docs = await list_continue_watching(db, student_id)
+        return {"progress": docs}
+
+    @api.patch("/studio/video/lessons/{lesson_id}")
+    async def update_lesson_route(lesson_id: str, payload: dict = Body(...), _admin=Depends(require_admin)):
+        try:
+            doc = await update_video_lesson(db, lesson_id, payload)
+        except VideoLibraryError as exc:
+            _raise(exc)
+        return {"ok": True, "lesson": doc}
+
+    @api.post("/studio/video/lessons/{lesson_id}/media")
+    async def upload_lesson_media_route(
+        lesson_id: str, file: UploadFile = File(...),
+        awaitTranscriptChoice: bool = Form(False),
+        admin=Depends(require_admin),
+    ):
+        raw = await file.read()
+        try:
+            doc = await attach_lesson_media(
+                db, lesson_id, raw=raw, declared_content_type=file.content_type or "",
+                media_bucket=sync_studio_tools.get_media_bucket(db), uploaded_by=getattr(admin, "email", ""),
+            )
+        except VideoLibraryError as exc:
+            _raise(exc)
+        # Denormalize the upload's content type onto the lesson so the
+        # pipeline (and the player's audio-vs-video rendering) never has to
+        # re-fetch the sync document to know what kind of media this is.
+        content_type = (file.content_type or "").split(";")[0].strip().lower()
+        if content_type:
+            await db[LESSONS_COLL].update_one(
+                {"lessonId": lesson_id}, {"$set": {"contentType": content_type}},
+            )
+            doc["contentType"] = content_type
+        # Manual transcript import (additive — see transcript_import.py):
+        # `awaitTranscriptChoice` defaults False, so every EXISTING caller
+        # that doesn't know this parameter exists gets byte-for-byte the
+        # same behavior as before it existed — media lands, the Gemini
+        # pipeline starts immediately, full stop. Only when the NEW
+        # frontend choice UI explicitly opts in does this route hold off,
+        # leaving the lesson with media attached but no pipeline started
+        # until the admin's choice lands via either POST .../pipeline/run
+        # (auto-generate — the same existing manual-retry endpoint) or
+        # POST .../pipeline/import-transcript (import).
+        if awaitTranscriptChoice:
+            return {"ok": True, "lesson": doc, "pipelineScheduled": False}
+        # Automatic AI processing — the product pipeline starts the moment
+        # media lands; the Studio polls GET …/pipeline for progress. Lazy
+        # import avoids a module cycle (pipeline imports this module's
+        # collection constants at call sites, never the reverse at import).
+        import video_pipeline_tools as _pipeline
+        _pipeline.schedule_pipeline(db, lesson_id, sync_studio_tools.get_media_bucket(db))
+        return {"ok": True, "lesson": doc, "pipelineScheduled": True}
+
+    @api.post("/studio/video/lessons/{lesson_id}/thumbnail")
+    async def upload_lesson_thumbnail_route(lesson_id: str, file: UploadFile = File(...), admin=Depends(require_admin)):
+        lesson = await get_video_lesson(db, lesson_id)
+        if not lesson:
+            raise HTTPException(status_code=404, detail=f"no lesson {lesson_id!r}")
+        raw = await file.read()
+        content_type = (file.content_type or "").split(";")[0].strip().lower()
+        ext = ALLOWED_THUMBNAIL_TYPES.get(content_type)
+        if not ext:
+            raise HTTPException(status_code=415, detail=f"unsupported image type: {content_type!r} (jpeg/png/webp)")
+        if not raw:
+            raise HTTPException(status_code=400, detail="uploaded file is empty")
+        if len(raw) > MAX_THUMBNAIL_BYTES:
+            raise HTTPException(status_code=413, detail="thumbnail exceeds the 5 MB limit")
+
+        import os as _os
+        import uuid as _uuid
+        image_id = _uuid.uuid4().hex
+        key = f"video-thumbs/{lesson_id}/{image_id}.{ext}"
+        url = await sync_studio_tools._upload_media_to_r2(
+            raw, key, content_type, {"uploadedBy": getattr(admin, "email", ""), "lessonId": lesson_id},
+        )
+        if not url:
+            filename = f"thumb-{image_id}.{ext}"
+            import io as _io
+            await sync_studio_tools.get_media_bucket(db).upload_from_stream(
+                filename, _io.BytesIO(raw),
+                metadata={"contentType": content_type, "lessonId": lesson_id},
+            )
+            public_base = _os.environ.get("PUBLIC_BACKEND_URL", "").rstrip("/")
+            url = f"{public_base}/api/sync/media/{filename}"
+        try:
+            doc = await update_video_lesson(db, lesson_id, {"thumbnailUrl": url})
+        except VideoLibraryError as exc:
+            _raise(exc)
+        return {"ok": True, "lesson": doc, "thumbnailUrl": url}
+
+    @api.delete("/studio/video/lessons/{lesson_id}/media")
+    async def delete_lesson_media_route(lesson_id: str, _admin=Depends(require_admin)):
+        try:
+            doc = await detach_lesson_media(db, lesson_id)
+        except VideoLibraryError as exc:
+            _raise(exc)
+        return {"ok": True, "lesson": doc}
+
+    @api.get("/studio/video/lessons/{lesson_id}/stats")
+    async def lesson_stats_route(lesson_id: str, _admin=Depends(require_admin)):
+        lesson = await get_video_lesson(db, lesson_id)
+        if not lesson:
+            raise HTTPException(status_code=404, detail=f"no lesson {lesson_id!r}")
+        purchases = await db[PURCHASES_COLL].find({"lessonId": lesson_id}, {"_id": 0}).to_list(length=1000)
+        progress = await db[PROGRESS_COLL].find({"lessonId": lesson_id}, {"_id": 0}).to_list(length=1000)
+        bookmarks_count = await db[BOOKMARKS_COLL].count_documents({"lessonId": lesson_id})
+        by_state: dict = {}
+        for p in purchases:
+            by_state[p.get("state", "?")] = by_state.get(p.get("state", "?"), 0) + 1
+        owned = by_state.get("succeeded", 0)
+        completed = sum(1 for p in progress if p.get("completed"))
+        avg_fraction = 0.0
+        fractions = [p["positionSec"] / p["durationSec"] for p in progress if p.get("durationSec")]
+        if fractions:
+            avg_fraction = round(sum(min(1.0, f) for f in fractions) / len(fractions), 3)
+        return {"stats": {
+            "lessonId": lesson_id,
+            "purchases": by_state,
+            "owners": owned,
+            "revenuePoints": owned * int(lesson.get("price") or 0),
+            "learners": len(progress),
+            "completions": completed,
+            "avgProgress": avg_fraction,
+            "bookmarks": bookmarks_count,
+        }}
+
+    @api.delete("/studio/video/lessons/{lesson_id}")
+    async def delete_lesson_route(lesson_id: str, _admin=Depends(require_admin)):
+        try:
+            await delete_video_lesson(db, lesson_id)
+        except VideoLibraryError as exc:
+            _raise(exc)
+        return {"ok": True}
+
+    @api.post("/video/lessons/{lesson_id}/bookmark")
+    async def bookmark_toggle_route(lesson_id: str, student=Depends(require_student)):
+        student_id = getattr(student, "clean_id", "") or getattr(student, "student_id", "")
+        try:
+            out = await toggle_bookmark(db, student_id=student_id, lesson_id=lesson_id)
+        except VideoLibraryError as exc:
+            _raise(exc)
+        return {"ok": True, **out}
+
+    @api.get("/video/bookmarks/mine")
+    async def my_bookmarks_route(student=Depends(require_student)):
+        student_id = getattr(student, "clean_id", "") or getattr(student, "student_id", "")
+        docs = await list_bookmarks(db, student_id)
+        return {"bookmarks": docs}
+
+    @api.get("/video/lessons/{lesson_id}/notes")
+    async def get_notes_route(lesson_id: str, student=Depends(require_student)):
+        student_id = getattr(student, "clean_id", "") or getattr(student, "student_id", "")
+        doc = await get_note(db, student_id, lesson_id)
+        return {"note": doc or {"lessonId": lesson_id, "text": ""}}
+
+    @api.put("/video/lessons/{lesson_id}/notes")
+    async def save_notes_route(lesson_id: str, payload: dict = Body(...), student=Depends(require_student)):
+        student_id = getattr(student, "clean_id", "") or getattr(student, "student_id", "")
+        doc = await save_note(db, student_id=student_id, lesson_id=lesson_id, text=payload.get("text", ""))
+        return {"ok": True, "note": doc}
+
+    @api.get("/admin/video/purchases/reconcile")
+    async def list_reconcile_purchases_route(_admin=Depends(require_admin)):
+        docs = await list_reconcile_purchases(db)
+        return {"purchases": docs}
+
+    @api.post("/admin/video/lessons/backfill-faststart")
+    async def backfill_faststart_route(payload: dict = Body(default_factory=dict), _admin=Depends(require_admin)):
+        """Manual-trigger-only faststart backfill for lessons uploaded
+        before remux_faststart existed. dry_run defaults True (safe) —
+        an admin must explicitly pass {"dryRun": false} to actually write
+        anything, matching this codebase's own migration-tool convention
+        (see wallet_service.py's /teacher/migration/import-wallets).
+        Batchable via `limit` (default 200) — re-invoke with the same
+        dryRun flag until `summary.scanned < limit` to cover a larger
+        library. Never runs automatically or on a schedule."""
+        dry_run = bool(payload.get("dryRun", True))
+        limit = min(int(payload.get("limit", 200)), 500)
+        result = await backfill_faststart_scan_all(
+            db, sync_studio_tools.get_media_bucket(db), dry_run=dry_run, limit=limit,
+        )
+        return result
+
+    @api.post("/admin/video/purchases/{student_id}/{lesson_id}/reconcile")
+    async def reconcile_route(student_id: str, lesson_id: str, payload: dict = Body(...), admin=Depends(require_admin)):
+        try:
+            doc = await admin_reconcile_purchase(
+                db, student_id, lesson_id,
+                resolution=payload.get("resolution", ""),
+                actor=getattr(admin, "email", ""),
+            )
+        except VideoLibraryError as exc:
+            _raise(exc)
+        return {"ok": True, "purchase": doc}
+
+    # ── Student-facing Video Library ────────────────────────────────────
+    @api.get("/video/lessons")
+    async def list_lessons_route(category: str = "", difficulty: str = "", q: str = "", student=Depends(require_student)):
+        lessons = await list_video_lessons(
+            db, status="published", category=category or None, difficulty=difficulty or None,
+        )
+        if q.strip():
+            # Learning-aware search: title/subtitle/instructor plus the
+            # Gemini-extracted vocabulary and key expressions — enrichment
+            # makes lessons discoverable by what they teach.
+            needle = q.strip().lower()[:80]
+
+            def _matches(lesson: dict) -> bool:
+                hay = [lesson.get("title", ""), lesson.get("subtitle", ""), lesson.get("instructor", ""),
+                       lesson.get("category") or "", (lesson.get("learning") or {}).get("summary", "")]
+                learning = lesson.get("learning") or {}
+                hay += [v.get("word", "") for v in learning.get("vocabulary") or []]
+                hay += learning.get("keyExpressions") or []
+                hay += [pv.get("phrase", "") for pv in (learning.get("phrasalVerbs") or []) + (learning.get("idioms") or [])]
+                return any(needle in str(h).lower() for h in hay)
+
+            lessons = [l for l in lessons if _matches(l)]
+        student_id = getattr(student, "clean_id", "") or getattr(student, "student_id", "")
+        out = [await serialize_lesson_for_student(db, lesson, student_id) for lesson in lessons]
+        return {"lessons": out}
+
+    @api.get("/video/lessons/{lesson_id}")
+    async def get_lesson_route(lesson_id: str, student=Depends(require_student)):
+        lesson = await get_video_lesson(db, lesson_id)
+        if not lesson or lesson.get("status") != "published":
+            raise HTTPException(status_code=404, detail="lesson not found")
+        student_id = getattr(student, "clean_id", "") or getattr(student, "student_id", "")
+        return {"lesson": await serialize_lesson_for_student(db, lesson, student_id)}
+
+    @api.post("/video/lessons/{lesson_id}/purchase")
+    async def purchase_route(lesson_id: str, payload: dict = Body(...), student=Depends(require_student)):
+        student_id = getattr(student, "clean_id", "") or getattr(student, "student_id", "")
+        try:
+            purchase = await initiate_purchase(
+                db, student_id=student_id, lesson_id=lesson_id, password=payload.get("password", ""),
+                coupon_code=(payload or {}).get("couponCode") or None,
+                fan_out_push=fan_out_push,
+            )
+        except VideoLibraryError as exc:
+            _raise(exc)
+        return {"ok": purchase.get("state") == "succeeded", "purchase": purchase}
+
+    @api.get("/video/restricted-points")
+    async def restricted_points_balance_route(student=Depends(require_student)):
+        """§2.7 — surfaced distinctly from the student's general points
+        balance, never merged into one displayed number, since the two
+        have different spending rules (restricted funds are Video-Library-
+        only and always spent before general points on a purchase)."""
+        student_id = getattr(student, "clean_id", "") or getattr(student, "student_id", "")
+        balance = await restricted_points.get_balance(db, student_id)
+        return {"restrictedBalance": balance}
+
+    @api.get("/video/purchases/mine")
+    async def my_purchases_route(student=Depends(require_student)):
+        student_id = getattr(student, "clean_id", "") or getattr(student, "student_id", "")
+        cursor = db[PURCHASES_COLL].find({"studentId": student_id}, {"_id": 0})
+        docs = await cursor.to_list(length=500)
+        return {"purchases": docs}
+
+    logger.info("video_library_tools: routes registered (/api/video*, /api/studio/video*)")
