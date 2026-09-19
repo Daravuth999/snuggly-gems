@@ -11,6 +11,7 @@ import {
   transcribeSegment,
 } from "@/lib/studio.functions";
 import { buildSrt, downloadText, extractSpeechSegments } from "@/lib/audio";
+import { Banner, Button, Card, Screen, Spinner, TopBar } from "@/components/app-ui";
 
 export const Route = createFileRoute("/_authenticated/studio/$videoId")({
   head: () => ({
@@ -130,79 +131,77 @@ function VideoDetail() {
   }
 
   return (
-    <main className="min-h-dvh bg-slate-950 text-slate-100 px-5 py-8">
-      <div className="mx-auto max-w-lg">
-        <Link to="/studio" className="text-sm text-slate-400 underline">← All videos</Link>
+    <Screen>
+      <TopBar
+        title={data?.video.title ?? "Video"}
+        subtitle={
+          data
+            ? `${data.video.narration_language === "km" ? "Khmer" : "English"} · ${Math.round(
+                Number(data.video.duration_sec ?? 0),
+              )}s`
+            : undefined
+        }
+        left={
+          <Link to="/studio" className="press text-[15px] text-ink-300">
+            ‹ Back
+          </Link>
+        }
+      />
 
-        {q.isPending && <p className="mt-6 text-sm text-slate-500">Loading…</p>}
+      <div className="mx-auto max-w-lg space-y-5 px-5 pt-5">
+        {q.isPending && <Spinner label="Loading…" />}
 
         {data && (
           <>
-            <h1 className="mt-4 text-xl font-semibold">{data.video.title}</h1>
-            <p className="text-sm text-slate-400">
-              {data.video.narration_language === "km" ? "Khmer narration" : "English narration"} ·{" "}
-              {Math.round(Number(data.video.duration_sec ?? 0))}s
-            </p>
-
             {data.videoUrl && (
               <video
                 src={data.videoUrl}
                 controls
                 playsInline
-                className="mt-4 w-full rounded-xl border border-slate-800 bg-black"
+                className="rise w-full rounded-[var(--radius-app)] border border-white/10 bg-black shadow-[0_24px_60px_-34px_rgba(0,0,0,1)]"
               />
             )}
 
-            {status && <p className="mt-4 text-sm text-emerald-400">{status}</p>}
-            {error && <p className="mt-4 text-sm text-rose-400">{error}</p>}
+            {status && <Card><Spinner label={status} /></Card>}
+            {error && <Banner tone="bad">{error}</Banner>}
 
-            <section className="mt-6 space-y-3">
-              <button
-                onClick={runTranscription}
-                disabled={Boolean(status)}
-                className="w-full rounded-lg bg-emerald-500 px-4 py-3 font-medium text-slate-950 disabled:opacity-50"
-              >
+            <Card className="space-y-2.5">
+              <Button onClick={runTranscription} disabled={Boolean(status)}>
                 {cues.length ? "Transcribe again" : "1 · Transcribe the original audio"}
-              </button>
+              </Button>
 
               {cues.length > 0 && (
-                <button
-                  onClick={runScript}
-                  disabled={Boolean(status)}
-                  className="w-full rounded-lg border border-emerald-500 px-4 py-3 font-medium text-emerald-300 disabled:opacity-50"
-                >
+                <Button variant="outline" onClick={runScript} disabled={Boolean(status)}>
                   {narration.length ? "Rewrite the narration" : "2 · Write the narration script"}
-                </button>
+                </Button>
               )}
 
               {narration.length > 0 && (
-                <button
-                  onClick={voiceAll}
-                  disabled={Boolean(status)}
-                  className="w-full rounded-lg border border-slate-700 px-4 py-3 font-medium disabled:opacity-50"
-                >
+                <Button variant="outline" onClick={voiceAll} disabled={Boolean(status)}>
                   3 · Record every narration line
-                </button>
+                </Button>
               )}
-            </section>
+            </Card>
 
             {cues.length > 0 && (
-              <section className="mt-8">
-                <div className="flex items-center justify-between">
-                  <h2 className="font-medium">Original transcript</h2>
+              <section>
+                <div className="mb-3 flex items-center justify-between gap-3 px-1">
+                  <h2 className="text-[13px] font-semibold uppercase tracking-widest text-ink-400">
+                    Original transcript
+                  </h2>
                   <button
                     onClick={() =>
                       downloadText(`${data.video.title}-original.srt`, buildSrt(cues, true))
                     }
-                    className="text-sm text-emerald-400 underline"
+                    className="press shrink-0 rounded-full border border-white/15 bg-white/5 px-3 py-1.5 text-[12px] font-semibold"
                   >
-                    Download SRT
+                    ↓ SRT
                   </button>
                 </div>
-                <ul className="mt-3 space-y-2 text-sm">
+                <ul className="space-y-2">
                   {cues.map((c) => (
-                    <li key={c.idx} className="rounded-lg border border-slate-800 p-3">
-                      <span className="block text-xs text-slate-500">
+                    <li key={c.idx} className="glass rounded-2xl p-3.5 text-[14px] leading-relaxed">
+                      <span className="mb-1 block text-[11px] tabular-nums text-ink-400">
                         {(c.start_ms / 1000).toFixed(2)}s – {(c.end_ms / 1000).toFixed(2)}s
                         {c.speaker ? ` · ${c.speaker}` : ""}
                       </span>
@@ -214,38 +213,43 @@ function VideoDetail() {
             )}
 
             {narration.length > 0 && (
-              <section className="mt-8">
-                <div className="flex items-center justify-between">
-                  <h2 className="font-medium">Narration</h2>
-                  <div className="flex gap-3">
-                    <button onClick={loadAudio} className="text-sm text-slate-400 underline">
+              <section>
+                <div className="mb-3 flex items-center justify-between gap-2 px-1">
+                  <h2 className="min-w-0 truncate text-[13px] font-semibold uppercase tracking-widest text-ink-400">
+                    Narration
+                  </h2>
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      onClick={loadAudio}
+                      className="press rounded-full border border-white/15 bg-white/5 px-3 py-1.5 text-[12px] font-semibold text-ink-300"
+                    >
                       Load audio
                     </button>
                     <button
                       onClick={() =>
                         downloadText(`${data.video.title}-narration.srt`, buildSrt(narration))
                       }
-                      className="text-sm text-emerald-400 underline"
+                      className="press rounded-full border border-white/15 bg-white/5 px-3 py-1.5 text-[12px] font-semibold"
                     >
-                      Download SRT
+                      ↓ SRT
                     </button>
                   </div>
                 </div>
-                <ul className="mt-3 space-y-2 text-sm">
+                <ul className="space-y-2">
                   {narration.map((l) => (
-                    <li key={l.idx} className="rounded-lg border border-slate-800 p-3">
-                      <span className="block text-xs text-slate-500">
+                    <li key={l.idx} className="glass rounded-2xl p-3.5">
+                      <span className="block text-[11px] tabular-nums text-ink-400">
                         {(l.start_ms / 1000).toFixed(1)}s – {(l.end_ms / 1000).toFixed(1)}s
                         {l.audio_ms ? ` · voiced ${(l.audio_ms / 1000).toFixed(1)}s` : ""}
                       </span>
-                      <p className="mt-1">{l.text}</p>
+                      <p className="mt-1 text-[14px] leading-relaxed">{l.text}</p>
                       {l.audio_path && audioUrls[l.audio_path] && (
-                        <audio src={audioUrls[l.audio_path]} controls className="mt-2 w-full" />
+                        <audio src={audioUrls[l.audio_path]} controls className="mt-2.5 w-full" />
                       )}
                       <button
                         onClick={() => voiceLine(l.idx)}
                         disabled={Boolean(status)}
-                        className="mt-2 rounded-md border border-slate-700 px-3 py-1.5 text-xs disabled:opacity-50"
+                        className="press mt-2.5 rounded-full border border-white/15 bg-white/5 px-3.5 py-1.5 text-[12px] font-semibold disabled:opacity-45"
                       >
                         {l.audio_path ? "Record again" : "Record this line"}
                       </button>
@@ -257,6 +261,6 @@ function VideoDetail() {
           </>
         )}
       </div>
-    </main>
+    </Screen>
   );
 }

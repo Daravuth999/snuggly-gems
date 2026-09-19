@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { supabase } from "@/integrations/supabase/client";
 import { claimAdmin } from "@/lib/studio.functions";
+import { Button, Card, Screen, Spinner } from "@/components/app-ui";
 
 export const Route = createFileRoute("/_authenticated")({
   ssr: false,
@@ -25,31 +26,36 @@ function AuthedLayout() {
 
   if (isPending) {
     return (
-      <div className="min-h-dvh bg-slate-950 text-slate-400 flex items-center justify-center">
-        Checking your access…
-      </div>
+      <Screen>
+        <div className="flex min-h-dvh items-center justify-center px-6">
+          <Spinner label="Checking your access…" />
+        </div>
+      </Screen>
     );
   }
 
   if (!data?.admin) {
     return (
-      <div className="min-h-dvh bg-slate-950 text-slate-100 flex items-center justify-center px-6 text-center">
-        <div>
-          <h1 className="text-xl font-semibold">Not an admin yet</h1>
-          <p className="mt-2 text-sm text-slate-400">
-            Ask an existing admin to add your email to the invite list, then sign in again.
-          </p>
-          <button
-            onClick={async () => {
-              await supabase.auth.signOut();
-              await navigate({ to: "/auth" });
-            }}
-            className="mt-6 rounded-lg border border-slate-700 px-4 py-2 text-sm"
-          >
-            Sign out
-          </button>
+      <Screen>
+        <div className="mx-auto flex min-h-dvh w-full max-w-sm items-center px-6">
+          <Card className="w-full text-center">
+            <h1 className="text-[20px] font-bold tracking-tight">Not an admin yet</h1>
+            <p className="mt-2 text-[13px] leading-relaxed text-ink-400">
+              Ask an existing admin to add your email to the invite list, then sign in again.
+            </p>
+            <Button
+              variant="outline"
+              className="mt-6"
+              onClick={async () => {
+                await supabase.auth.signOut();
+                await navigate({ to: "/auth" });
+              }}
+            >
+              Sign out
+            </Button>
+          </Card>
         </div>
-      </div>
+      </Screen>
     );
   }
 
