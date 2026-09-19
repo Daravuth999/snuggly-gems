@@ -113,6 +113,21 @@ test("renders Continue Learning only for lessons with real saved progress", asyn
   expect(row).not.toHaveTextContent("Untouched Lesson");
 });
 
+test("renders the premium discovery prompt and real progress in the adaptive path", async () => {
+  listLessons.mockResolvedValue([
+    lesson(),
+    lesson({ lessonId: "vid_2", title: "Next Conversation", featured: false }),
+  ]);
+  listContinueWatching.mockResolvedValue([{ lessonId: "vid_1", positionSec: 24, durationSec: 60, completed: false }]);
+  listRecentlyWatched.mockResolvedValue([{ lessonId: "vid_1", positionSec: 24, durationSec: 60, completed: false }]);
+  render(<VideoLibraryDashboard />);
+
+  expect(await screen.findByText("What will you unlock today?")).toBeInTheDocument();
+  expect(screen.getByTestId("video-library-spotlight")).toHaveTextContent("40% complete");
+  expect(screen.getByTestId("video-library-adaptive-path")).toHaveTextContent("40%");
+  expect(screen.getByTestId("video-library-adaptive-path")).toHaveTextContent("Ordering Coffee");
+});
+
 test("switching difficulty tabs re-fetches with the selected filter", async () => {
   listLessons.mockResolvedValue([lesson()]);
   render(<VideoLibraryDashboard />);
