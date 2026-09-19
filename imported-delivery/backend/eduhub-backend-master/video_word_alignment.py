@@ -428,23 +428,17 @@ async def run_word_alignment(media_bytes: bytes, transcript_text: str, gemini_sy
     """Orchestrates one real-alignment attempt for one pipeline run.
     NEVER raises — a transient provider failure (rate limit, timeout,
     HTTP error), a missing provider (no API key configured), or audio
-    longer than gemini-3.5-transcribe's documented word-timestamp limit
+    longer than the configured provider limit
     must never block the lesson's pipeline from completing with Gemini's
     existing interpolated timing (§1.5's resilience requirement). Returns
     (sync_doc, telemetry) — `sync_doc` is `gemini_sync` unchanged on any
     non-success path, so the caller can always just use the returned
     document without branching on status itself.
 
-    `transcript_text` is accepted for call-site/interface stability (the
-    pipeline already has it computed for other purposes) but is currently
-    UNUSED here: gemini-3.5-transcribe's Interactions API documents no
-    reference-transcript-conditioning parameter — it always performs full
-    ASR from scratch, exactly like the removed ElevenLabs Scribe design did.
-    `content_type` is the pipeline's already-extracted audio's real mime
-    type (e.g. "audio/mpeg") — required so the Gemini Files API upload
-    transcodes it correctly; the removed ElevenLabs Scribe design didn't
-    need this since it accepted a raw multipart file with no mime
-    negotiation."""
+    `transcript_text` is retained for interface compatibility. Neither
+    supported provider performs reference-conditioned forced alignment.
+    `content_type` is the extracted audio's real MIME type and is forwarded
+    to the selected provider."""
     if provider is None:
         selected = (os.environ.get("VIDEO_ALIGNMENT_PROVIDER") or "elevenlabs").strip().lower()
         missing_key = "GEMINI_API_KEY" if selected == "gemini" else "ELEVENLABS_API_KEY"

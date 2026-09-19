@@ -335,10 +335,10 @@ async def run_pipeline(db, lesson_id: str, media_bucket, *, imported_transcript:
     transcript_import.py): when provided, this is `{"format": "srt"|
     "vtt", "segments": [{speaker, start, end, text}, ...]}` — already
     parsed by the route below. ONLY the speech_recognition stage's
-    actual Gemini calls (segmentation + word-alignment) are bypassed;
+    actual provider calls (speech recognition + word alignment) are bypassed;
     every other stage (media_check, audio_extraction's own step-tracking,
     synchronization, educational_analysis, review_ready) runs exactly as
-    it does for the Gemini-auto-generate path, reusing the SAME
+    it does for the automatic path, reusing the SAME
     downstream code with no branching beyond this one fork point. When
     None (the default), behavior is byte-for-byte identical to before
     this parameter existed."""
@@ -520,31 +520,46 @@ async def run_pipeline(db, lesson_id: str, media_bucket, *, imported_transcript:
             await sync_studio_tools.mark_alignment_processing(db, sync_id)
             alignment_provider = video_word_alignment.get_word_alignment_provider()
             if alignment_provider is not None and alignment_provider.provider_version.startswith("elevenlabs-scribe"):
-                result = await alignment_provider.align(transcribe_bytes, content_type=transcribe_ct)
-                transcript_text = result.get("transcriptText", "")
-                measured_words = [
-                    word
-                    for paragraph in (result.get("sync") or {}).get("paragraphs") or []
-                    for sentence in paragraph.get("sentences") or []
-                    for word in sentence.get("words") or []
-                ]
-                word_alignment_meta = {
-                    "status": "complete",
-                    "provider": alignment_provider.provider_version,
-                    "totalWords": len(measured_words),
-                    "matchedWords": len(measured_words),
-                    "matchRatio": 1.0 if measured_words else 0.0,
-                    "meanAlignmentConfidence": None,
-                    "lowConfidenceWordCount": sum(
-                        1 for word in measured_words
+                try:
+                    result = await alignment_provider.align(transcribe_bytes, content_type=transcribe_ct)
+                    transcript_text = result.get("transcriptText", "")
+                    measured_words = [
+                        word
+                        for paragraph in (result.get("sync") or {}).get("paragraphs") or []
+                        for sentence in paragraph.get("sentences") or []
+                        for word in sentence.get("words") or []
+                    ]
+                    if not measured_words:
+                        raise RuntimeError("ElevenLabs returned no spoken words")
+                    confidences = [
+                        word["confidence"]["transcript"]
+                        for word in measured_words
                         if isinstance((word.get("confidence") or {}).get("transcript"), (int, float))
-                        and word["confidence"]["transcript"] < 0.7
-                    ),
-                    "languageCode": result.get("languageCode"),
-                    "languageProbability": result.get("languageProbability"),
-                    "attemptedAt": _now(),
-                }
-                result["sync"]["wordAlignment"] = word_alignment_meta
+                    ]
+                    word_alignment_meta = {
+                        "status": "complete",
+                        "provider": alignment_provider.provider_version,
+                        "totalWords": len(measured_words),
+                        "matchedWords": len(measured_words),
+                        "matchRatio": 1.0,
+                        "meanAlignmentConfidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
+                        "lowConfidenceWordCount": sum(confidence < 0.7 for confidence in confidences),
+                        "languageCode": result.get("languageCode"),
+                        "languageProbability": result.get("languageProbability"),
+                        "attemptedAt": _now(),
+                    }
+                    result["sync"]["wordAlignment"] = word_alignment_meta
+                except Exception as exc:  # noqa: BLE001 — preserve the existing lesson workflow
+                    logger.warning("video_pipeline: ElevenLabs timing failed lesson=%s (%s)", lesson_id, exc)
+                    result = await provider.align(transcribe_bytes, transcribe_ct)
+                    transcript_text = result.get("transcriptText", "")
+                    word_alignment_meta = {
+                        "status": "failed",
+                        "provider": alignment_provider.provider_version,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "attemptedAt": _now(),
+                    }
+                    result["sync"]["wordAlignment"] = word_alignment_meta
             else:
                 # Explicit rollback path: retain the established Gemini
                 # sentence structure and merge measured words onto it.

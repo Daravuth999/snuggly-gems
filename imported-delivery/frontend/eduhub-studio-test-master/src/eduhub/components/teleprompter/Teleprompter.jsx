@@ -82,16 +82,9 @@ const HIGH_CONFIDENCE_ALIGNMENT = 0.6;
  *   "high"      — every word in the sentence earns real, measured status,
  *                  either via a numeric alignment confidence >=
  *                  HIGH_CONFIDENCE_ALIGNMENT (legacy ElevenLabs-Scribe
- *                  lessons) or via `word.measured === true` (2026-09
- *                  Gemini-only redesign, video_word_alignment.py's
- *                  GeminiWordTimestampProvider — gemini-3.5-transcribe
- *                  publishes no per-word confidence score at all, confirmed
- *                  live against Gemini's own docs, so `measured` is a
- *                  plain, non-fabricated FACT about provenance — two
- *                  independent Gemini transcriptions of the same audio
- *                  agreed on this exact word — used in place of a numeric
- *                  score that provider simply does not supply, never a
- *                  fabricated confidence number standing in for one) —
+  *                  lessons) or via `word.measured === true`. This is a
+  *                  plain fact about timing provenance, never a fabricated
+  *                  confidence value standing in for one) —
  *                  the full karaoke experience is earned either way.
  *   "uncertain" — the sentence has words, but at least one lacks either
  *                 signal above (Gemini's interpolated estimate, or a
