@@ -1,0 +1,178 @@
+/**
+ * PipelinePanel.test.jsx — RTL tests over the real rendered panel, same
+ * convention as VoiceProductionPanel.test.jsx: mocks ../../videoLibraryApi
+ * entirely.
+ *
+ * Focus: the "blocked cascade" fix. Several display rows share one real
+ * backend step (e.g. "ElevenLabs speech & word timing" and "Speaker diarization"
+ * both mirror the backend's "speech_recognition" step). Before this fix,
+ * a failed backend step made every row sharing it show the SAME raw
+ * provider error under a different, unrelated label — misleadingly
+ * implying two independent defects. Only the first row for a failed
+ * backend step should show the real error; later rows must show a calm
+ * "Blocked — X failed" instead.
+ */
+import { render, screen } from "@testing-library/react";
+import PipelinePanel from "../PipelinePanel";
+
+jest.mock("../../videoLibraryApi", () => ({
+  getPipeline: jest.fn(),
+  runPipeline: jest.fn(),
+}));
+
+const LESSON = { lessonId: "vid_1", title: "Sealing the Deal", mediaRef: "https://pub-x.r2.dev/vid.mov" };
+
+function stepsWith(overrides) {
+  const base = {
+    media_check: { status: "complete" },
+    audio_extraction: { status: "complete" },
+    speech_recognition: { status: "pending" },
+    synchronization: { status: "pending" },
+    educational_analysis: { status: "pending" },
+    review_ready: { status: "pending" },
+  };
+  return { ...base, ...overrides };
+}
+
+test("a failed speech_recognition step shows the real error once, and Speaker detection as Blocked", () => {
+  const pipeline = {
+    state: "failed",
+    steps: stepsWith({
+      speech_recognition: { status: "failed", error: "VideoAiError: Gemini returned no parsable segments" },
+    }),
+  };
+  render(<PipelinePanel lesson={{ ...LESSON, pipeline }} onChanged={() => {}} />);
+
+  const speechRow = screen.getByTestId("pipeline-step-2");
+  expect(speechRow).toHaveTextContent("ElevenLabs speech & word timing");
+  expect(speechRow).toHaveTextContent("VideoAiError: Gemini returned no parsable segments");
+
+  const speakerRow = screen.getByTestId("pipeline-step-3"); // "Speaker detection"
+  expect(speakerRow).toHaveTextContent("Speaker diarization");
+  expect(speakerRow).toHaveTextContent("Blocked");
+  expect(speakerRow).toHaveTextContent("ElevenLabs speech & word timing failed");
+  // The raw provider error must never be duplicated under this row.
+  expect(speakerRow).not.toHaveTextContent("Gemini returned no parsable segments");
+});
+
+// ── ground-truth sync timing note (2026-08 word-highlight-desync fix) ──
+// synchronization can COMPLETE successfully and still carry a non-fatal
+// note (video_pipeline_tools.py's ffprobe-based ground-truth check) — this
+// must render distinctly from a failure, never silently disappear just
+// because the step's own status is "complete".
+test("a completed synchronization step still surfaces its ground-truth timing note", () => {
+  const pipeline = {
+    state: "complete",
+    steps: stepsWith({
+      speech_recognition: { status: "complete" },
+      synchronization: {
+        status: "complete",
+        error: "timing check: Gemini's transcript reports speech ending at 45.0s, but the media measures 2.0s — the reported timing exceeds the real duration and is not reliable. Recommend reviewing playback sync before approving.",
+      },
+      educational_analysis: { status: "complete" },
+      review_ready: { status: "complete" },
+    }),
+  };
+  render(<PipelinePanel lesson={{ ...LESSON, pipeline }} onChanged={() => {}} />);
+
+  const segmentationRow = screen.getByTestId("pipeline-step-4"); // "Sentence segmentation"
+  expect(segmentationRow).toHaveTextContent("not reliable");
+  const syncRow = screen.getByTestId("pipeline-step-5"); // "Synchronization generation"
+  expect(syncRow).toHaveTextContent("not reliable");
+  // Informational, not alarming — never styled/labeled as a failure.
+  expect(syncRow).not.toHaveTextContent("Blocked");
+});
+
+test("a completed synchronization step with no note renders cleanly, no stray empty note", () => {
+  const pipeline = {
+    state: "complete",
+    steps: stepsWith({
+      speech_recognition: { status: "complete" },
+      synchronization: { status: "complete" },
+      educational_analysis: { status: "complete" },
+      review_ready: { status: "complete" },
+    }),
+  };
+  render(<PipelinePanel lesson={{ ...LESSON, pipeline }} onChanged={() => {}} />);
+  expect(screen.queryByTestId("pipeline-step-4-note")).not.toBeInTheDocument();
+  expect(screen.queryByTestId("pipeline-step-5-note")).not.toBeInTheDocument();
+});
+
+test("the same cascade rule applies to every secondary row sharing a failed backend step", () => {
+  const pipeline = {
+    state: "failed",
+    steps: stepsWith({
+      media_check: { status: "complete" },
+      audio_extraction: { status: "complete" },
+      speech_recognition: { status: "complete" },
+      synchronization: { status: "complete" },
+      educational_analysis: { status: "failed", error: "AnalysisError: transcript too short" },
+    }),
+  };
+  render(<PipelinePanel lesson={{ ...LESSON, pipeline }} onChanged={() => {}} />);
+
+  const primary = screen.getByTestId("pipeline-step-6"); // "Educational analysis"
+  expect(primary).toHaveTextContent("AnalysisError: transcript too short");
+
+  for (const i of [7, 8, 9]) { // Vocabulary extraction, Grammar notes, CEFR classification
+    const row = screen.getByTestId(`pipeline-step-${i}`);
+    expect(row).toHaveTextContent("Blocked");
+    expect(row).toHaveTextContent("Gemini teaching analysis failed");
+    expect(row).not.toHaveTextContent("transcript too short");
+  }
+});
+
+test("when nothing has failed, no row shows a Blocked state", () => {
+  const pipeline = { state: "complete", steps: stepsWith({
+    media_check: { status: "complete" }, audio_extraction: { status: "complete" },
+    speech_recognition: { status: "complete" }, synchronization: { status: "complete" },
+    educational_analysis: { status: "complete" }, review_ready: { status: "complete" },
+  }) };
+  render(<PipelinePanel lesson={{ ...LESSON, pipeline }} onChanged={() => {}} />);
+  expect(screen.queryByText(/Blocked/)).not.toBeInTheDocument();
+});
+
+// ── Silent video: "skipped" is an honest, non-alarming terminal state ─────
+test("a silent video's skipped steps show an honest reason, never a failure", () => {
+  const pipeline = {
+    state: "complete",
+    steps: stepsWith({
+      audio_extraction: { status: "complete", error: "no audio track detected — this video is silent" },
+      speech_recognition: { status: "skipped", error: "no audio track — nothing to transcribe" },
+      synchronization: { status: "skipped", error: "no transcript to synchronize — this video has no audio" },
+      educational_analysis: {
+        status: "skipped", error: "no transcript to analyze — run Story Analysis for visual understanding",
+      },
+      review_ready: { status: "complete" },
+    }),
+  };
+  render(<PipelinePanel lesson={{ ...LESSON, pipeline }} onChanged={() => {}} />);
+
+  expect(screen.getByTestId("pipeline-state-badge")).toHaveTextContent("Complete");
+  expect(screen.queryByText(/Blocked/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/^Failed$/)).not.toBeInTheDocument();
+
+  const speechRow = screen.getByTestId("pipeline-step-2");
+  expect(speechRow).toHaveTextContent("no audio track — nothing to transcribe");
+
+  const speakerRow = screen.getByTestId("pipeline-step-3"); // "Speaker detection"
+  expect(speakerRow).toHaveTextContent("no audio track — nothing to transcribe");
+
+  const eduRow = screen.getByTestId("pipeline-step-6"); // "Educational analysis"
+  expect(eduRow).toHaveTextContent("run Story Analysis for visual understanding");
+});
+
+test("skipped steps count toward the progress meter like completed ones", () => {
+  const pipeline = {
+    state: "complete",
+    steps: stepsWith({
+      speech_recognition: { status: "skipped" },
+      synchronization: { status: "skipped" },
+      educational_analysis: { status: "skipped" },
+      review_ready: { status: "complete" },
+    }),
+  };
+  render(<PipelinePanel lesson={{ ...LESSON, pipeline }} onChanged={() => {}} />);
+  // 11 display rows, all resolved (complete or skipped) — meter reads 100%.
+  expect(screen.getByTestId("pipeline-progress-meter")).toHaveStyle({ width: "100%" });
+});

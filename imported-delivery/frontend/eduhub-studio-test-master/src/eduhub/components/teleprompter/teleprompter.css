@@ -1,0 +1,172 @@
+/* teleprompter.css — reading-surface polish for the shared Teleprompter
+   and the Video Library transcript panel. Scoped by tp- prefixes. */
+
+@keyframes tp-rise {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* Dedicated reading viewport: previous phrases glide up and fade behind
+   the upper mask; upcoming text fades in from below. Only the visual
+   viewport changes — the full transcript stays in the DOM for search,
+   seeking, accessibility and replay. */
+.tp-viewport {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 44px, #000 calc(100% - 36px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 44px, #000 calc(100% - 36px), transparent 100%);
+  overscroll-behavior: contain;
+}
+
+.tp-stage {
+  background: linear-gradient(180deg, rgba(8, 12, 22, 0.98), rgba(12, 17, 28, 0.96));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.tp-sync-status {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(8, 12, 22, 0.82);
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+  backdrop-filter: blur(10px);
+}
+
+.tp-sync-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: #a8967a;
+}
+
+.tp-sync-dot-live {
+  background: #8fd6a8;
+  box-shadow: 0 0 10px rgba(143, 214, 168, 0.72);
+}
+
+/* The highlight pill's padding is RESERVED AT ALL TIMES (active or not) and
+   cancelled with an equal negative margin — so the word's total margin-box
+   width never changes when it becomes active. Only background-color/color/
+   opacity ever change. This is deliberate: an active word gaining padding
+   only when highlighted would widen it, shifting every word after it on
+   the line (visible as a harsh "jump" — the exact defect this fixes). */
+.tp-word {
+  border-radius: 4px;
+  padding: 0 3px;
+  margin: 0 -3px;
+  /* Same premium ease-out curve as the rest of the app's motion language
+     (motionTokens.js's easing.premiumEaseOut, [0.22, 1, 0.36, 1]) — a
+     plain linear "ease" reads as slightly mechanical for something as
+     frequent and fast-paced as a word-by-word karaoke sweep. 220ms (up
+     from 160ms) gives the color/background fade enough time to actually
+     read as a fade rather than a snap at natural speech pace, without
+     running long enough to overlap the next word at fast speech. */
+  transition: color 220ms cubic-bezier(0.22, 1, 0.36, 1),
+              background-color 220ms cubic-bezier(0.22, 1, 0.36, 1),
+              opacity 300ms ease;
+}
+
+.tp-word[data-word-active="true"] {
+  box-shadow: 0 0 0 1px rgba(255, 225, 154, 0.34), 0 0 18px rgba(212, 168, 67, 0.24);
+}
+
+.tp-sentence {
+  transition: opacity 420ms ease, background-color 300ms ease, border-color 300ms ease, transform 420ms ease;
+}
+
+/* Same reserved-footprint technique for the flowing-paragraph (storytelling)
+   sentence highlight — its rounded highlight background must not add to
+   the paragraph's inline flow width when a sentence becomes active.
+   transform transitions only matter in center-focus mode (Teleprompter.jsx
+   sets transform/opacity inline per sentence via focusZone.js there) —
+   transform/opacity are compositor-only properties, so animating them
+   never triggers layout/reflow even when many sentences transition
+   together on a sentence change. */
+.tp-sentence-story {
+  border-radius: 4px;
+  padding: 1px 2px;
+  margin: -1px -2px;
+  transition: opacity 420ms ease, background-color 300ms ease, transform 420ms ease;
+}
+
+/* §4 confidence-tiered rendering — the "uncertain" tier's own deliberate
+   visual (never a glitch-looking fallback): a dashed underline reads as
+   "this section is estimated" without implying anything is broken. Only
+   ever applied when the ACTIVE sentence's real per-word alignment
+   confidence doesn't support crisp word-level precision (see
+   Teleprompter.jsx's computeSentenceConfidenceTier) — text-decoration
+   (not border-bottom) so it wraps naturally across multiple lines within
+   the flowing paragraph, unlike a box border on an inline span. */
+.tp-sentence-uncertain {
+  text-decoration: underline dashed rgba(168, 150, 122, 0.55);
+  text-underline-offset: 3px;
+}
+
+/* Bilingual learning layer — the Khmer line under the CURRENTLY active
+   sentence only (see Teleprompter.jsx's TranslationLine). Deliberately
+   softer than the English text (smaller, lower-opacity, no highlight
+   background) so English stays visually dominant per the master
+   directive — this is a supporting translation, not a second transcript
+   competing for attention. display:block forces its own line without
+   needing a wrapping element change on the (inline) storytelling span. */
+.tp-translation {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.86em;
+  font-family: "Noto Sans Khmer", "Khmer OS", system-ui, sans-serif;
+  color: rgba(255, 255, 255, 0.62);
+  opacity: 0;
+  animation: tp-translation-in 260ms ease forwards;
+}
+
+@keyframes tp-translation-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.tp-follow-chip {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #111;
+  background: rgba(212, 168, 67, 0.95);
+  box-shadow: 0 6px 18px -6px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  z-index: 5;
+  animation: tp-rise 240ms ease both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tp-word,
+  .tp-sentence,
+  .tp-sentence-story {
+    transition: none !important;
+  }
+  .tp-translation {
+    animation: none !important;
+    opacity: 1;
+  }
+  .tp-follow-chip {
+    animation: none !important;
+  }
+}

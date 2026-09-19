@@ -1,0 +1,226 @@
+/**
+ * assessments.css — AI Assessment / Quiz Submission Lab, student surface.
+ * Own, independent stylesheet (same one-file-per-feature convention as
+ * videoLibrary.css).
+ *
+ * DAY MODE: every Assessment Lab student surface is wrapped in
+ * `.asmt-theme`. The blanket `text-white` / `border-white/*` / `bg-white/*`
+ * utilities are remapped here onto the app's REAL theme tokens
+ * (premium-tokens.css's --eh-ink-* / --eh-border-* / --eh-surface-* ramps),
+ * so Day Mode readability comes from the underlying theme system — not
+ * hardcoded white/black overrides. Dark mode is unchanged.
+ */
+
+/* ── theme-token remap (Day Mode) ─────────────────────────────────── */
+html[data-theme="light"] .asmt-theme .text-white { color: var(--eh-ink-1); }
+html[data-theme="light"] .asmt-theme [class*="text-white/"] { color: var(--eh-ink-2); }
+html[data-theme="light"] .asmt-theme [class*="text-white/4"],
+html[data-theme="light"] .asmt-theme [class*="text-white/3"] { color: var(--eh-ink-3); }
+html[data-theme="light"] .asmt-theme [class*="border-white/"] { border-color: var(--eh-border-2); }
+html[data-theme="light"] .asmt-theme [class*="bg-white/"] { background-color: rgba(13, 10, 20, 0.04); }
+html[data-theme="light"] .asmt-theme .bg-black\/30,
+html[data-theme="light"] .asmt-theme .bg-black\/20 { background-color: var(--eh-surface-2); }
+
+/* Status accent text needs deeper hues on a light surface for AA contrast. */
+html[data-theme="light"] .asmt-theme .text-amber-300,
+html[data-theme="light"] .asmt-theme [class*="text-amber-200"] { color: #8a5f13; }
+html[data-theme="light"] .asmt-theme .text-emerald-300,
+html[data-theme="light"] .asmt-theme .text-emerald-400,
+html[data-theme="light"] .asmt-theme [class*="text-emerald-200"] { color: #14764a; }
+html[data-theme="light"] .asmt-theme .text-rose-300,
+html[data-theme="light"] .asmt-theme .text-red-300,
+html[data-theme="light"] .asmt-theme .text-red-400,
+html[data-theme="light"] .asmt-theme [class*="text-rose-200"] { color: #a83a45; }
+html[data-theme="light"] .asmt-theme .text-orange-300 { color: #9a5a10; }
+
+html[data-theme="light"] .asmt-modal-overlay {
+  background: rgba(13, 10, 20, 0.35) !important;
+}
+html[data-theme="light"] .asmt-modal-card {
+  background: var(--eh-surface-1);
+  border-color: var(--eh-border-2);
+  color: var(--eh-ink-1);
+  box-shadow: var(--eh-shadow-3);
+}
+
+/* ── phase cross-fade ─────────────────────────────────────────────── */
+@keyframes asmt-phase-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.asmt-phase-in { animation: asmt-phase-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+/* ── sheet entrance (detail / results / submit surfaces) ──────────────── */
+@keyframes asmt-sheet-in {
+  from { opacity: 0; transform: translateY(22px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.asmt-sheet-in { animation: asmt-sheet-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+.asmt-grab-handle {
+  width: 38px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  margin: 0 auto 4px;
+}
+html[data-theme="light"] .asmt-grab-handle { background: rgba(13, 10, 20, 0.18); }
+
+/* ── list cards ──────────────────────────────────────────────────── */
+.asmt-card { transition: border-color 160ms ease, background-color 160ms ease; }
+@media (hover: hover) {
+  .asmt-card:hover { border-color: rgba(255, 255, 255, 0.18); background-color: rgba(255, 255, 255, 0.055); }
+  html[data-theme="light"] .asmt-theme .asmt-card:hover { background-color: rgba(13, 10, 20, 0.06); }
+}
+
+.asmt-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.asmt-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+}
+html[data-theme="light"] .asmt-theme .asmt-divider { background: var(--eh-border-2); }
+
+/* ── skeleton shimmer (loading) ─────────────────────────────────────── */
+@keyframes asmt-skeleton-wave {
+  0%   { background-position: -160% 0; }
+  100% { background-position: 160% 0; }
+}
+.asmt-skeleton {
+  background: linear-gradient(
+    100deg,
+    rgba(255, 255, 255, 0.05) 30%,
+    rgba(255, 255, 255, 0.11) 50%,
+    rgba(255, 255, 255, 0.05) 70%
+  );
+  background-size: 200% 100%;
+  animation: asmt-skeleton-wave 1.5s ease-in-out infinite;
+}
+html[data-theme="light"] .asmt-theme .asmt-skeleton {
+  background: linear-gradient(
+    100deg,
+    rgba(13, 10, 20, 0.05) 30%,
+    rgba(13, 10, 20, 0.11) 50%,
+    rgba(13, 10, 20, 0.05) 70%
+  );
+  background-size: 200% 100%;
+}
+
+/* ── lifecycle timeline (Submitted → AI checked → Review → Awarded) ───── */
+.asmt-tl { list-style: none; margin: 0; padding: 0; }
+.asmt-tl-row { display: flex; gap: 12px; }
+.asmt-tl-rail { display: flex; flex-direction: column; align-items: center; width: 22px; flex-shrink: 0; }
+.asmt-tl-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.asmt-tl-dot-done {
+  background: rgba(125, 208, 138, 0.14);
+  border: 1px solid rgba(125, 208, 138, 0.45);
+  color: #7dd08a;
+}
+.asmt-tl-dot-active {
+  background: rgba(212, 168, 67, 0.14);
+  border: 1px solid rgba(212, 168, 67, 0.5);
+  color: var(--eh-gold, #d4a843);
+  animation: asmt-pulse-ring 1.6s ease-out infinite;
+}
+.asmt-tl-dot-failed {
+  background: rgba(224, 138, 138, 0.12);
+  border: 1px solid rgba(224, 138, 138, 0.45);
+  color: #e08a8a;
+}
+.asmt-tl-dot-pending {
+  width: 22px;
+  height: 22px;
+  border: 1px dashed rgba(255, 255, 255, 0.2);
+  background: transparent;
+}
+html[data-theme="light"] .asmt-theme .asmt-tl-dot-pending { border-color: rgba(13, 10, 20, 0.22); }
+.asmt-tl-line {
+  width: 2px;
+  flex: 1;
+  min-height: 10px;
+  margin: 3px 0;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+}
+html[data-theme="light"] .asmt-theme .asmt-tl-line { background: rgba(13, 10, 20, 0.12); }
+.asmt-tl-line-done { background: rgba(125, 208, 138, 0.4); }
+html[data-theme="light"] .asmt-theme .asmt-tl-line-done { background: rgba(20, 118, 74, 0.45); }
+
+/* ── per-question badges ───────────────────────────────────────────── */
+.asmt-qbadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.asmt-qrow { transition: border-color 160ms ease; }
+@media (hover: hover) {
+  .asmt-qrow:hover { border-color: rgba(255, 255, 255, 0.18); }
+}
+
+/* ── immersive submission progress (READY → … → SUBMITTED journey) ────── */
+@keyframes asmt-shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+@keyframes asmt-stage-pop {
+  0%   { transform: scale(0.6); opacity: 0; }
+  60%  { transform: scale(1.12); }
+  100% { transform: scale(1); opacity: 1; }
+}
+@keyframes asmt-pulse-ring {
+  0%   { box-shadow: 0 0 0 0 rgba(212, 168, 67, 0.45); }
+  100% { box-shadow: 0 0 0 10px rgba(212, 168, 67, 0); }
+}
+
+.asmt-progress-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(212, 168, 67, 0.16);
+  overflow: hidden;
+}
+.asmt-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(212, 168, 67, 0.55), #d4a843, rgba(212, 168, 67, 0.55));
+  background-size: 200% 100%;
+  animation: asmt-shimmer 1.6s linear infinite;
+  transition: width 600ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.asmt-stage-icon-active {
+  animation: asmt-stage-pop 380ms cubic-bezier(0.22, 1, 0.36, 1) both,
+             asmt-pulse-ring 1.4s ease-out infinite;
+}
+.asmt-stage-done { animation: asmt-stage-pop 300ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+.asmt-stage-row { transition: opacity 400ms ease, transform 400ms ease; }
+
+/* ── reduced motion: comprehension without movement ──────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .asmt-modal-overlay,
+  .asmt-modal-card,
+  .asmt-phase-in,
+  .asmt-sheet-in,
+  .asmt-skeleton,
+  .asmt-progress-fill,
+  .asmt-stage-icon-active,
+  .asmt-stage-done,
+  .asmt-tl-dot-active,
+  .asmt-stage-row { animation: none !important; transition: none !important; }
+}

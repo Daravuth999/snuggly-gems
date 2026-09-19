@@ -1,0 +1,2167 @@
+"""tests/test_attendance_v2.py
+=================================
+v2 rollout: separated status/verification model (Partial root-cause fix),
+monthly attendance analytics + reward claim, teacher QR endpoint.
+
+Same self-contained in-memory harness as tests/test_attendance_checkin.py
+(direct route-function calls, no real DB, no TestClient) so these exercise
+the REAL attendance_tools.py route logic end to end.
+
+The v2 flag is AND-gated (env var AND a settings-doc field) and fail-closed
+— every test that needs v2 ON sets both explicitly via monkeypatch/settings
+seeding, and several tests explicitly prove the flag OFF path is untouched.
+"""
+from __future__ import annotations
+
+import asyncio
+import copy
+import re
+
+import attendance_tools as att
+
+
+def run(c):
+    return asyncio.run(c)
+
+
+# ── same in-memory Mongo fake as test_attendance_checkin.py ────────────────
+def _match(doc, q):
+    for k, v in q.items():
+        if k == "$or":
+            if not any(_match(doc, sub) for sub in v):
+                return False
+            continue
+        dv = doc.get(k)
+        if isinstance(v, dict):
+            if "$in" in v and dv not in v["$in"]:
+                return False
+            if "$ne" in v and dv == v["$ne"]:
+                return False
+            if "$gte" in v and not (dv is not None and dv >= v["$gte"]):
+                return False
+            if "$regex" in v:
+                flags = re.I if "i" in (v.get("$options") or "") else 0
+                if dv is None or not re.search(v["$regex"], str(dv), flags):
+                    return False
+        elif dv != v:
+            return False
+    return True
+
+
+class _Cursor:
+    def __init__(s, d):
+        s._d = d
+
+    def sort(s, f, d=1):
+        s._d.sort(key=lambda x: x.get(f) or "", reverse=(d == -1))
+        return s
+
+    def limit(s, n):
+        s._d = s._d[:n]
+        return s
+
+    def __aiter__(s):
+        async def g():
+            for x in s._d:
+                yield x
+        return g()
+
+
+class _Coll:
+    def __init__(s):
+        s.docs = {}
+        s._auto = 0
+
+    async def create_index(s, *a, **k):
+        return None
+
+    async def find_one(s, q, p=None):
+        for d in s.docs.values():
+            if _match(d, q):
+                o = copy.deepcopy(d)
+                if p and p.get("_id") == 0:
+                    o.pop("_id", None)
+                return o
+        return None
+
+    def _apply(s, doc, up):
+        set_keys = set((up.get("$set") or {}).keys())
+        soi_keys = set((up.get("$setOnInsert") or {}).keys())
+        clash = set_keys & soi_keys
+        if clash:
+            raise ValueError(f"Updating the path '{sorted(clash)[0]}' would create a conflict")
+        if "$setOnInsert" in up:
+            for k, v in up["$setOnInsert"].items():
+                doc.setdefault(k, v)
+        if "$set" in up:
+            doc.update(up["$set"])
+        if "$unset" in up:
+            for k in up["$unset"]:
+                doc.pop(k, None)
+        if "$inc" in up:
+            for k, v in up["$inc"].items():
+                doc[k] = (doc.get(k) or 0) + v
+        return doc
+
+    async def update_one(s, q, up, upsert=False):
+        for d in s.docs.values():
+            if _match(d, q):
+                s._apply(d, up)
+                return type("R", (), {"matched_count": 1})()
+        if upsert:
+            base = {}
+            for k, v in q.items():
+                if not isinstance(v, dict) and k != "$or":
+                    base[k] = v
+            s._apply(base, up)
+            key = base.get("_id") or f"auto{s._auto}"
+            s._auto += 1
+            base.setdefault("_id", key)
+            s.docs[key] = base
+        return type("R", (), {"matched_count": 0})()
+
+    async def insert_one(s, doc):
+        key = doc.get("_id") or f"auto{s._auto}"
+        s._auto += 1
+        doc.setdefault("_id", key)
+        s.docs[key] = copy.deepcopy(doc)
+        return type("R", (), {"inserted_id": key})()
+
+    async def delete_one(s, q):
+        for k, d in list(s.docs.items()):
+            if _match(d, q):
+                del s.docs[k]
+                return type("R", (), {"deleted_count": 1})()
+        return type("R", (), {"deleted_count": 0})()
+
+    async def replace_one(s, q, doc, upsert=False):
+        for k, d in list(s.docs.items()):
+            if _match(d, q):
+                s.docs[k] = copy.deepcopy(doc)
+                return type("R", (), {"matched_count": 1})()
+        if upsert:
+            key = doc.get("_id") or f"auto{s._auto}"
+            s._auto += 1
+            doc = dict(doc)
+            doc.setdefault("_id", key)
+            s.docs[key] = copy.deepcopy(doc)
+        return type("R", (), {"matched_count": 0})()
+
+    def find(s, q, p=None):
+        out = []
+        for d in s.docs.values():
+            if _match(d, q):
+                o = copy.deepcopy(d)
+                if p and p.get("_id") == 0:
+                    o.pop("_id", None)
+                out.append(o)
+        return _Cursor(out)
+
+
+class _DB:
+    def __init__(s):
+        s._c = {}
+
+    def __getitem__(s, n):
+        return s._c.setdefault(n, _Coll())
+
+    def __getattr__(s, n):
+        if n.startswith("_"):
+            raise AttributeError(n)
+        return s._c.setdefault(n, _Coll())
+
+
+class _Router:
+    def __init__(s):
+        s.routes = {}
+
+    def get(s, p):
+        def d(fn):
+            s.routes[("GET", p)] = fn
+            return fn
+        return d
+
+    def post(s, p):
+        def d(fn):
+            s.routes[("POST", p)] = fn
+            return fn
+        return d
+
+    def put(s, p):
+        def d(fn):
+            s.routes[("PUT", p)] = fn
+            return fn
+        return d
+
+    def delete(s, p):
+        def d(fn):
+            s.routes[("DELETE", p)] = fn
+            return fn
+        return d
+
+    def patch(s, p):
+        def d(fn):
+            s.routes[("PATCH", p)] = fn
+            return fn
+        return d
+
+
+class _Student:
+    def __init__(s, sid="stu_alice"):
+        s.student_id = sid
+        s.clean_id = sid
+
+
+class _Admin:
+    email = "admin@example.com"
+    is_admin = True
+
+
+class _Wallet:
+    def __init__(self):
+        self.seen = {}
+        self.calls = 0
+
+    async def credit(self, student_id, amount, *, source, source_ref=None,
+                     idempotency_key=None, clean_id=None, **kw):
+        self.calls += 1
+        if idempotency_key in self.seen:
+            return {"ok": True, "duplicate": True}
+        self.seen[idempotency_key] = amount
+        return {"ok": True, "duplicate": False, "transaction_id": f"tx{self.calls}"}
+
+
+def _call(router, m, p, **kw):
+    return run(router.routes[(m, p)](**kw))
+
+
+def _build(wallet=None):
+    db = _DB()
+    router = _Router()
+
+    async def fan_out(query, title, body, url):
+        return (0, 0)
+
+    def build_q(target, ids, group):
+        return {"target": target, "studentId": {"$in": list(ids or [])}}
+
+    att.register_attendance_routes(
+        router, db, require_admin=_Admin(), require_student=object(),
+        current_student=None, fan_out_push=fan_out, build_target_query=build_q,
+        norm_student_id=lambda v: str(v or "").strip().lower(), wallet=wallet,
+    )
+    return db, router
+
+
+def _build_capturing(wallet=None):
+    """Same as _build() but records every fan_out_push call — for the
+    monthly goal-reached/reward-ready push tests, which need to assert on
+    WHICH students were targeted and with what copy, not just that a route
+    didn't crash."""
+    db = _DB()
+    router = _Router()
+    pushes = []
+
+    async def fan_out(query, title, body, url):
+        pushes.append({"query": query, "title": title, "body": body, "url": url})
+        return (1, 0)
+
+    def build_q(target, ids, group):
+        return {"target": target, "studentId": {"$in": list(ids or [])}}
+
+    att.register_attendance_routes(
+        router, db, require_admin=_Admin(), require_student=object(),
+        current_student=None, fan_out_push=fan_out, build_target_query=build_q,
+        norm_student_id=lambda v: str(v or "").strip().lower(), wallet=wallet,
+    )
+    return db, router, pushes
+
+
+def _seed_class(db, roster=("stu_alice",), cid="cls_x"):
+    db[att.COLL_CLASSES].docs[cid] = {
+        "_id": cid, "class_id": cid, "title_en": "English A1", "title_kh": "",
+        "roster": [r.lower() for r in roster], "group": "",
+    }
+    for r in roster:
+        db.students.docs[r] = {
+            "_id": r, "student_id": r, "clean_id": r, "display_name": r.upper(),
+        }
+    return cid
+
+
+def _seed_open_session(db, cid="cls_x", slug="abc123", sid="ses_1",
+                       mid_session_enabled=True, date=None, now=None):
+    """``now`` defaults to the real wall clock (unchanged for every
+    existing caller). Tests that need check-in's real-time window check
+    (_session_open) to agree with a frozen att._utcnow() — see
+    _freeze_time_to_fixed_august below — pass the SAME fixed instant here
+    so opens_at/closes_at/grace_deadline are anchored to it instead of
+    real time."""
+    from datetime import datetime, timedelta, timezone
+    now = now or datetime.now(timezone.utc)
+    db[att.COLL_SESSIONS].docs[sid] = {
+        "_id": sid, "session_id": sid, "class_id": cid, "join_slug": slug,
+        "meet_url": "https://meet.google.com/real-xyz", "status": att.SESS_OPEN,
+        "opens_at": now.isoformat(),
+        "closes_at": (now + timedelta(hours=1)).isoformat(),
+        "grace_minutes": 10, "mid_session_enabled": mid_session_enabled,
+        "date": date or now.date().isoformat(),
+    }
+    return sid
+
+
+def _freeze_time_to_fixed_august(monkeypatch):
+    """Freeze att._utcnow() to a fixed August 2026 instant so 'current
+    period' deterministically resolves to 2026-08 regardless of the real
+    wall-clock date the suite happens to run on (these tests' own session
+    dates are hardcoded to 2026-08-xx). Returns the fixed instant — pass
+    it to _seed_open_session(..., now=fixed) too, so a session's own
+    opens_at/closes_at window is anchored to the SAME instant; otherwise
+    check-in's real-time window check (_session_open) would reject every
+    check-in once real wall-clock time drifts outside whatever window a
+    real datetime.now() produced at seed time."""
+    from datetime import datetime, timezone
+    fixed = datetime(2026, 8, 20, 9, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(att, "_utcnow", lambda: fixed)
+    return fixed
+
+
+def _v2_settings(**overrides):
+    doc = {
+        "_id": att.SETTINGS_ID, "v2_enabled": True,
+        # Flat 1.0x multiplier by default — the reliability-tier bonus
+        # system is a distinct, separately-tested feature; leaving the real
+        # default_settings() tiers active here would let a brand-new
+        # student's first perfect-attendance session silently jump straight
+        # to a Diamond-tier 2x multiplier, making every base_attendance_points
+        # assertion in this file ambiguous about which feature it's proving.
+        # Callers that DO want to exercise tiers pass reward_tiers explicitly.
+        "reward_tiers": [
+            {"tier": att.TIER_BRONZE, "min_attendance_rate": 0.0, "min_on_time_rate": 0.0, "multiplier": 1.0},
+        ],
+    }
+    doc.update(overrides)
+    return doc
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Pure functions
+# ─────────────────────────────────────────────────────────────────────────
+def test_finalize_status_v2_never_downgrades_to_partial():
+    # The exact scenario that used to produce present_partial: checked in
+    # on time, mid-session confirmation never tapped.
+    assert att.finalize_status_v2(True, att.ST_PRESENT_FULL) == att.ST_PRESENT_FULL
+
+
+def test_finalize_status_v2_absent_when_never_checked_in():
+    assert att.finalize_status_v2(False, None) == att.ST_ABSENT
+
+
+def test_finalize_status_v2_preserves_late():
+    assert att.finalize_status_v2(True, att.ST_LATE) == att.ST_LATE
+
+
+def test_verification_status_not_applicable_when_never_checked_in():
+    assert att.compute_verification_status(False, False, True) == "not_applicable"
+
+
+def test_verification_status_not_required_when_mid_session_off():
+    assert att.compute_verification_status(True, False, False) == "not_required"
+
+
+def test_verification_status_pending_when_unconfirmed():
+    assert att.compute_verification_status(True, False, True) == "pending"
+
+
+def test_verification_status_confirmed_when_tapped():
+    assert att.compute_verification_status(True, True, True) == "confirmed"
+
+
+def test_monthly_stats_zero_classes():
+    stats = att.compute_monthly_stats([])
+    assert stats == {
+        "present": 0, "partial": 0, "late": 0, "absent": 0,
+        "attended": 0, "total": 0, "attendance_pct": 0.0,
+    }
+
+
+def test_monthly_stats_all_present():
+    stats = att.compute_monthly_stats([att.ST_PRESENT_FULL] * 5)
+    assert stats["attended"] == 5 and stats["total"] == 5 and stats["attendance_pct"] == 100.0
+
+
+def test_monthly_stats_mixed_counts_partial_as_attended():
+    stats = att.compute_monthly_stats(
+        [att.ST_PRESENT_FULL, att.ST_PRESENT_FULL, att.ST_PRESENT_PARTIAL,
+         att.ST_LATE, att.ST_ABSENT]
+    )
+    assert stats["present"] == 2 and stats["partial"] == 1 and stats["late"] == 1 and stats["absent"] == 1
+    assert stats["attended"] == 4 and stats["total"] == 5
+    assert stats["attendance_pct"] == 80.0
+
+
+def test_eligibility_zero_denominator_is_never_met():
+    stats = att.compute_monthly_stats([])
+    elig = att.compute_monthly_eligibility(stats, 0.85)
+    assert elig["met"] is False
+
+
+def test_eligibility_exactly_at_threshold_is_met():
+    stats = att.compute_monthly_stats([att.ST_PRESENT_FULL] * 17 + [att.ST_ABSENT] * 3)  # 85%
+    elig = att.compute_monthly_eligibility(stats, 0.85)
+    assert stats["attendance_pct"] == 85.0
+    assert elig["met"] is True
+
+
+def test_eligibility_exceeded_is_met():
+    stats = att.compute_monthly_stats([att.ST_PRESENT_FULL] * 9 + [att.ST_ABSENT] * 1)  # 90%
+    elig = att.compute_monthly_eligibility(stats, 0.85)
+    assert elig["met"] is True
+
+
+def test_eligibility_missed_is_not_met():
+    stats = att.compute_monthly_stats([att.ST_PRESENT_FULL] * 7 + [att.ST_ABSENT] * 3)  # 70%
+    elig = att.compute_monthly_eligibility(stats, 0.85)
+    assert elig["met"] is False
+
+
+def test_v2_active_requires_both_env_and_db_flag(monkeypatch):
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+    assert att._v2_active({"v2_enabled": True}) is False  # env off
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    assert att._v2_active({"v2_enabled": False}) is False  # db off
+    assert att._v2_active({"v2_enabled": True}) is True    # both on
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# v2-status endpoint
+# ─────────────────────────────────────────────────────────────────────────
+def test_v2_status_reflects_flag_state(monkeypatch):
+    db, router = _build()
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+    assert _call(router, "GET", "/attendance/v2-status")["enabled"] is False
+
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings()
+    assert _call(router, "GET", "/attendance/v2-status")["enabled"] is False  # env still off
+
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    assert _call(router, "GET", "/attendance/v2-status")["enabled"] is True
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# _do_close — the actual regression-fix proof
+# ─────────────────────────────────────────────────────────────────────────
+def test_close_with_v2_off_still_produces_partial_unchanged(monkeypatch):
+    """Backward-compatibility proof: with the flag off, behavior is
+    byte-for-byte the pre-existing legacy path."""
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+    db, router = _build()
+    _seed_class(db)
+    _seed_open_session(db)
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="abc123"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    rec = db[att.COLL_RECORDS].docs["ses_1:stu_alice"]
+    assert rec["status"] == att.ST_PRESENT_PARTIAL
+    assert "verification_status" not in rec
+
+
+def test_close_with_v2_on_never_produces_punitive_partial(monkeypatch):
+    """The actual fix: same scenario (checked in on time, mid-session tap
+    never made — because no UI anywhere calls it), but v2 keeps the
+    student's attendance_status honestly Present, with verification
+    carried as a separate, non-punitive signal."""
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings()
+    _seed_class(db)
+    _seed_open_session(db)
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="abc123"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    rec = db[att.COLL_RECORDS].docs["ses_1:stu_alice"]
+    assert rec["status"] == att.ST_PRESENT_FULL
+    assert rec["verification_status"] == "pending"
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_close_with_v2_on_confirmed_tap_is_verified(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings()
+    _seed_class(db)
+    _seed_open_session(db)
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="abc123"), student=_Student("stu_alice"))
+    _call(router, "POST", "/attendance/mid-session-confirm",
+          payload=att.MidSessionIn(session_id="ses_1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    rec = db[att.COLL_RECORDS].docs["ses_1:stu_alice"]
+    assert rec["status"] == att.ST_PRESENT_FULL
+    assert rec["verification_status"] == "confirmed"
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_close_with_v2_on_absent_student_unaffected():
+    """A student who never checks in stays absent under v2 too — the fix
+    only changes the unconfirmed-but-present case."""
+    import os
+    os.environ[att.V2_ENV_VAR] = "true"
+    try:
+        db, router = _build()
+        db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings()
+        _seed_class(db, roster=("stu_alice", "stu_bob"))
+        _seed_open_session(db)
+        _call(router, "POST", "/attendance/checkin",
+              payload=att.CheckInIn(slug="abc123"), student=_Student("stu_alice"))
+        _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+        rec = db[att.COLL_RECORDS].docs["ses_1:stu_bob"]
+        assert rec["status"] == att.ST_ABSENT
+        assert rec["verification_status"] == "not_applicable"
+    finally:
+        os.environ.pop(att.V2_ENV_VAR, None)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Monthly summary
+# ─────────────────────────────────────────────────────────────────────────
+def test_monthly_summary_404_when_v2_off(monkeypatch):
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+    db, router = _build()
+    try:
+        _call(router, "GET", "/attendance/monthly-summary", student=_Student("stu_alice"))
+        assert False, "expected HTTPException"
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 404
+
+
+def _seed_campaign(db, campaign_id="lrc_aug", *, name="August Attendance Bonus",
+                   reward_label="", points=50, enabled=True, reward_kind="points",
+                   start_at=None, end_at=None):
+    db["login_reward_campaigns"].docs[campaign_id] = {
+        "_id": campaign_id, "id": campaign_id, "campaign_id": campaign_id,
+        "name": name, "reward_label": reward_label,
+        "reward_points": points, "reward_kind": reward_kind,
+        "enabled": enabled, "start_at": start_at, "end_at": end_at,
+    }
+    return campaign_id
+
+
+def test_monthly_summary_zero_classes_never_eligible(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(monthly_reward_enabled=True)
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["stats"]["total"] == 0
+    assert res["eligible"] is False
+    assert res["can_claim"] is False
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_summary_eligible_shows_real_campaign_name_and_points(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    cid = _seed_campaign(db, name="August Attendance Bonus", points=50)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.5, monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["eligible"] is True
+    assert res["reward_enabled"] is True
+    assert res["reward_configured"] is True
+    assert res["reward_name"] == "August Attendance Bonus"  # the REAL campaign name, never invented
+    assert res["reward_points"] == 50                        # the REAL configured points
+    assert res["reward_campaign_status"] == "live"
+    assert res["can_claim"] is True
+    assert res["already_claimed"] is False
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_summary_reward_label_overrides_campaign_name_when_set(monkeypatch):
+    """reward_label is the student-facing reward identity (e.g. "Attendance
+    Champion"); campaign `name` is the admin's internal campaign title.
+    reward_label wins when the admin has filled it in."""
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    cid = _seed_campaign(db, name="Internal Aug Campaign", reward_label="Attendance Champion", points=50)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.0, monthly_reward_campaign_id=cid,
+    )
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["reward_name"] == "Attendance Champion"
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_summary_no_campaign_attached_is_not_configured_not_a_fake_reward(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.0, monthly_reward_campaign_id=None,
+    )
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["reward_enabled"] is True
+    assert res["reward_configured"] is False
+    assert res["reward_name"] is None
+    assert res["reward_points"] is None
+    assert res["can_claim"] is False
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_summary_disabled_campaign_is_unavailable_not_claimable(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    cid = _seed_campaign(db, enabled=False)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.5, monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["eligible"] is True
+    assert res["reward_configured"] is True
+    assert res["reward_campaign_status"] == "disabled"
+    assert res["can_claim"] is False  # eligible, but the real reward isn't live
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_summary_expired_campaign_is_unavailable(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    cid = _seed_campaign(db, end_at="2020-01-01T00:00:00+00:00")
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.0, monthly_reward_campaign_id=cid,
+    )
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["reward_campaign_status"] == "expired"
+    assert res["can_claim"] is False
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_summary_voucher_only_campaign_cannot_fund_points_reward(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    cid = _seed_campaign(db, reward_kind="voucher", points=0)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.0, monthly_reward_campaign_id=cid,
+    )
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["reward_configured"] is False  # voucher-only campaigns don't count as configured here
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_summary_reward_disabled_never_allows_claim(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    cid = _seed_campaign(db)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=False, monthly_reward_threshold_pct=0.5, monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["eligible"] is True         # attendance itself is still met
+    assert res["reward_enabled"] is False
+    assert res["reward_configured"] is False  # not even fetched when the master toggle is off
+    assert res["can_claim"] is False        # but claiming stays gated off
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Monthly claim
+# ─────────────────────────────────────────────────────────────────────────
+def test_monthly_claim_404_when_v2_off(monkeypatch):
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+    db, router = _build()
+    try:
+        _call(router, "POST", "/attendance/rewards/monthly/claim",
+              payload={}, student=_Student("stu_alice"))
+        assert False, "expected HTTPException"
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 404
+
+
+def test_monthly_claim_403_when_reward_disabled(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(monthly_reward_enabled=False)
+    try:
+        _call(router, "POST", "/attendance/rewards/monthly/claim",
+              payload={"period": "2026-08"}, student=_Student("stu_alice"))
+        assert False, "expected HTTPException"
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 403
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_claim_403_when_not_eligible(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build(wallet=_Wallet())
+    cid = _seed_campaign(db)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.85, monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01")
+    # Never check in — 0 attendance, definitely not eligible.
+    try:
+        _call(router, "POST", "/attendance/rewards/monthly/claim",
+              payload={"period": "2026-08"}, student=_Student("stu_alice"))
+        assert False, "expected HTTPException"
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 403
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_claim_success_credits_the_real_configured_points(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    cid = _seed_campaign(db, name="August Attendance Bonus", points=50)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.5, monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    calls_after_session_close = wallet.calls  # per-session reward already credited once here
+
+    res = _call(router, "POST", "/attendance/rewards/monthly/claim",
+                payload={"period": "2026-08"}, student=_Student("stu_alice"))
+    assert res["ok"] is True
+    assert res["already_claimed"] is False
+    assert res["points"] == 50
+    assert res["reward_name"] == "August Attendance Bonus"
+    assert wallet.calls == calls_after_session_close + 1
+    claim = run(db[att.COLL_CLAIMS].find_one(
+        {"idempotency_key": "attendance_monthly:2026-08:stu_alice"}))
+    assert claim is not None
+    assert claim["status"] == "claimed"
+    assert claim["source_campaign_id"] == cid
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_claim_uses_the_points_value_at_claim_time_not_a_stale_cached_number(monkeypatch):
+    """If the admin changes the campaign's points between when the student
+    loaded the summary and when they tap Claim, the amount actually
+    credited is whatever the campaign says RIGHT NOW — proving nothing is
+    cached/copied into attendance_settings."""
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    cid = _seed_campaign(db, points=50)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.5, monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+
+    # Admin bumps the campaign's points AFTER the student's summary loaded.
+    db["login_reward_campaigns"].docs[cid]["reward_points"] = 999
+
+    res = _call(router, "POST", "/attendance/rewards/monthly/claim",
+                payload={"period": "2026-08"}, student=_Student("stu_alice"))
+    assert res["points"] == 999
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_claim_409_when_campaign_became_unavailable(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build(wallet=_Wallet())
+    cid = _seed_campaign(db, enabled=False)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.5, monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    try:
+        _call(router, "POST", "/attendance/rewards/monthly/claim",
+              payload={"period": "2026-08"}, student=_Student("stu_alice"))
+        assert False, "expected HTTPException"
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 409
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_claim_is_idempotent_never_double_credits(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    cid = _seed_campaign(db, points=50)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.5, monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    calls_after_session_close = wallet.calls
+
+    first = _call(router, "POST", "/attendance/rewards/monthly/claim",
+                  payload={"period": "2026-08"}, student=_Student("stu_alice"))
+    second = _call(router, "POST", "/attendance/rewards/monthly/claim",
+                   payload={"period": "2026-08"}, student=_Student("stu_alice"))
+    assert first["already_claimed"] is False
+    assert second["already_claimed"] is True
+    assert second["reward_name"] == "August Attendance Bonus"
+    # The second request short-circuits on the existing "claimed" row before
+    # ever touching the wallet again — only the first claim call reaches it.
+    assert wallet.calls == calls_after_session_close + 1
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_claim_success_fires_congratulations_push_with_real_points(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router, pushes = _build_capturing(wallet=wallet)
+    cid = _seed_campaign(db, name="August Attendance Bonus", points=50)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.5, monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    pushes.clear()  # only care about the claim's own push from here
+
+    _call(router, "POST", "/attendance/rewards/monthly/claim",
+          payload={"period": "2026-08"}, student=_Student("stu_alice"))
+    assert len(pushes) == 1
+    assert "50" in pushes[0]["body"]
+    assert pushes[0]["query"]["studentId"]["$in"] == ["stu_alice"]
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_claim_retry_never_resends_the_congratulations_push(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router, pushes = _build_capturing(wallet=wallet)
+    cid = _seed_campaign(db, points=50)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.5, monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    pushes.clear()
+
+    _call(router, "POST", "/attendance/rewards/monthly/claim",
+          payload={"period": "2026-08"}, student=_Student("stu_alice"))
+    assert len(pushes) == 1
+    # A retry (double-tap, refresh, retry-after-timeout) hits the
+    # already-claimed early return — must never re-send the congratulations.
+    _call(router, "POST", "/attendance/rewards/monthly/claim",
+          payload={"period": "2026-08"}, student=_Student("stu_alice"))
+    assert len(pushes) == 1
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_monthly_claim_400_when_no_campaign_configured(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build(wallet=_Wallet())
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.5, monthly_reward_campaign_id=None,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    try:
+        _call(router, "POST", "/attendance/rewards/monthly/claim",
+              payload={"period": "2026-08"}, student=_Student("stu_alice"))
+        assert False, "expected HTTPException"
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Pure campaign-status helper
+# ─────────────────────────────────────────────────────────────────────────
+def test_derive_campaign_status_disabled_wins_over_dates():
+    assert att._derive_campaign_status({"enabled": False}) == att.CAMP_DISABLED
+
+
+def test_derive_campaign_status_live_with_no_dates():
+    assert att._derive_campaign_status({"enabled": True}) == att.CAMP_LIVE
+
+
+def test_derive_campaign_status_scheduled_before_start():
+    from datetime import datetime, timedelta, timezone
+    future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    assert att._derive_campaign_status({"enabled": True, "start_at": future}) == att.CAMP_SCHEDULED
+
+
+def test_derive_campaign_status_expired_after_end():
+    from datetime import datetime, timedelta, timezone
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    assert att._derive_campaign_status({"enabled": True, "end_at": past}) == att.CAMP_EXPIRED
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Teacher QR endpoint
+# ─────────────────────────────────────────────────────────────────────────
+def test_session_qr_success_for_matching_url():
+    db, router = _build()
+    _seed_class(db)
+    _seed_open_session(db, slug="abc123", sid="ses_1")
+    res = _call(router, "GET", "/admin/attendance/sessions/{session_id}/qr",
+                session_id="ses_1",
+                join_url="https://eduhub-studio-test.vercel.app/attendance/j/abc123",
+                admin=_Admin())
+    assert res["ok"] is True
+    assert res["qr_png_data_uri"].startswith("data:image/png;base64,")
+
+
+def test_session_qr_rejects_mismatched_url():
+    db, router = _build()
+    _seed_class(db)
+    _seed_open_session(db, slug="abc123", sid="ses_1")
+    try:
+        _call(router, "GET", "/admin/attendance/sessions/{session_id}/qr",
+              session_id="ses_1",
+              join_url="https://evil.example.com/phishing",
+              admin=_Admin())
+        assert False, "expected HTTPException"
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+
+
+def test_session_qr_404_for_unknown_session():
+    db, router = _build()
+    try:
+        _call(router, "GET", "/admin/attendance/sessions/{session_id}/qr",
+              session_id="ses_missing",
+              join_url="https://eduhub-studio-test.vercel.app/attendance/j/xyz",
+              admin=_Admin())
+        assert False, "expected HTTPException"
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 404
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# /attendance/me — verification_status surfaced for the new UI's "Verifying" tag
+# ─────────────────────────────────────────────────────────────────────────
+def test_me_history_surfaces_verification_status_when_v2_on(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings()
+    _seed_class(db)
+    _seed_open_session(db)
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="abc123"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close",
+          session_id="ses_1", admin=_Admin())
+    res = _call(router, "GET", "/attendance/me", student=_Student("stu_alice"))
+    assert res["history"][0]["verification_status"] == "pending"
+    assert res["history"][0]["status"] == att.ST_PRESENT_FULL  # never Partial
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_me_history_verification_status_absent_on_legacy_records(monkeypatch):
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+    db, router = _build()
+    _seed_class(db)
+    _seed_open_session(db)
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="abc123"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close",
+          session_id="ses_1", admin=_Admin())
+    res = _call(router, "GET", "/attendance/me", student=_Student("stu_alice"))
+    assert res["history"][0]["verification_status"] is None
+    assert res["history"][0]["status"] == att.ST_PRESENT_PARTIAL  # legacy unchanged
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# _shift_period — pure "YYYY-MM" arithmetic
+# ─────────────────────────────────────────────────────────────────────────
+def test_shift_period_one_month_back():
+    assert att._shift_period("2026-08", 1) == "2026-07"
+
+
+def test_shift_period_crosses_year_boundary():
+    assert att._shift_period("2026-08", 8) == "2025-12"
+
+
+def test_shift_period_zero_is_identity():
+    assert att._shift_period("2026-08", 0) == "2026-08"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# GET /attendance/monthly-history — Attendance History card's own data,
+# separate from the per-session recent list.
+# ─────────────────────────────────────────────────────────────────────────
+def test_monthly_history_404_when_v2_off():
+    db, router = _build()
+    try:
+        _call(router, "GET", "/attendance/monthly-history", months=6, class_id=None,
+              student=_Student("stu_alice"))
+        assert False, "expected HTTPException"
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 404
+
+
+def test_monthly_history_current_month_first_reflects_real_attendance(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(monthly_reward_threshold_pct=0.5)
+    _seed_class(db)
+    fixed_now = _freeze_time_to_fixed_august(monkeypatch)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01", now=fixed_now)
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close",
+          session_id="ses_1", admin=_Admin())
+    res = _call(router, "GET", "/attendance/monthly-history", months=3, class_id=None,
+                student=_Student("stu_alice"))
+    assert len(res["months"]) == 3
+    current = res["months"][0]
+    assert current["period"] == "2026-08"
+    assert current["stats"]["total"] == 1
+    assert current["eligible"] is True
+    # Older months with nothing recorded are never a fake passing grade.
+    assert res["months"][1]["stats"]["total"] == 0
+    assert res["months"][1]["eligible"] is False
+
+
+def test_monthly_history_months_param_clamped(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings()
+    _seed_class(db)
+    res = _call(router, "GET", "/attendance/monthly-history", months=999, class_id=None,
+                student=_Student("stu_alice"))
+    assert len(res["months"]) == 12  # clamped, never an unbounded scan
+    res2 = _call(router, "GET", "/attendance/monthly-history", months=0, class_id=None,
+                 student=_Student("stu_alice"))
+    assert len(res2["months"]) == 1  # clamped to at least 1
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# GET /admin/attendance/monthly-reward/preview — live "N/M qualify" for the
+# Settings threshold slider, server-side, same eligibility functions as the
+# real per-student routes.
+# ─────────────────────────────────────────────────────────────────────────
+def test_admin_preview_counts_qualifying_students_against_class_roster():
+    db, router = _build()
+    _seed_class(db, roster=("stu_alice", "stu_bob"))
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    # stu_bob never checks in — 0% this month.
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close",
+          session_id="ses_1", admin=_Admin())
+    res = _call(router, "GET", "/admin/attendance/monthly-reward/preview",
+                threshold_pct=0.5, month="2026-08", class_id=None, admin=_Admin())
+    assert res["total"] == 2       # whole class roster, not just those with records
+    assert res["qualifying"] == 1  # only stu_alice meets 50%
+
+
+def test_admin_preview_scoped_to_one_class_excludes_other_classes_roster():
+    db, router = _build()
+    _seed_class(db, roster=("stu_alice",), cid="cls_a")
+    _seed_class(db, roster=("stu_bob",), cid="cls_b")
+    res = _call(router, "GET", "/admin/attendance/monthly-reward/preview",
+                threshold_pct=0.5, month="2026-08", class_id="cls_a", admin=_Admin())
+    assert res["total"] == 1
+    assert res["class_id"] == "cls_a"
+
+
+def test_admin_preview_unscoped_dedupes_students_across_classes():
+    db, router = _build()
+    _seed_class(db, roster=("stu_alice",), cid="cls_a")
+    _seed_class(db, roster=("stu_alice", "stu_bob"), cid="cls_b")
+    res = _call(router, "GET", "/admin/attendance/monthly-reward/preview",
+                threshold_pct=0.5, month="2026-08", class_id=None, admin=_Admin())
+    assert res["total"] == 2  # stu_alice counted once, not twice
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# GET /admin/attendance/sessions/{session_id}/roster — real-time per-student
+# roster for ONE session (name, check-in time, status), never invented.
+# ─────────────────────────────────────────────────────────────────────────
+def test_admin_session_roster_shows_present_pending_and_absent():
+    db, router = _build()
+    _seed_class(db, roster=("stu_alice", "stu_bob", "stu_carol"))
+    _seed_open_session(db, sid="ses_1", slug="s1")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    res = _call(router, "GET", "/admin/attendance/sessions/{session_id}/roster",
+                session_id="ses_1", admin=_Admin())
+    assert res["total"] == 3
+    by_id = {r["student_id"]: r for r in res["roster"]}
+    assert by_id["stu_alice"]["status"] == att.ST_PRESENT_FULL
+    assert by_id["stu_alice"]["checked_in_at"] is not None
+    assert by_id["stu_alice"]["display_name"] == "STU_ALICE"
+    # Session still open — never-checked-in students are "pending", not
+    # falsely marked absent while there's still time to check in.
+    assert by_id["stu_bob"]["status"] == "pending"
+    assert by_id["stu_bob"]["checked_in_at"] is None
+    assert res["checked_in"] == 1
+    assert res["present"] == 1
+
+
+def test_admin_session_roster_marks_absent_once_session_closed():
+    db, router = _build()
+    _seed_class(db, roster=("stu_alice", "stu_bob"))
+    _seed_open_session(db, sid="ses_1", slug="s1")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close",
+          session_id="ses_1", admin=_Admin())
+    res = _call(router, "GET", "/admin/attendance/sessions/{session_id}/roster",
+                session_id="ses_1", admin=_Admin())
+    by_id = {r["student_id"]: r for r in res["roster"]}
+    assert by_id["stu_bob"]["status"] == att.ST_ABSENT
+    assert res["absent"] == 1
+
+
+def test_admin_session_roster_404_unknown_session():
+    db, router = _build()
+    try:
+        _call(router, "GET", "/admin/attendance/sessions/{session_id}/roster",
+              session_id="ses_missing", admin=_Admin())
+        assert False, "expected HTTPException"
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 404
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Monthly goal-reached / monthly-reward-ready pushes (session-close trigger)
+# ─────────────────────────────────────────────────────────────────────────
+def test_close_fires_goal_reached_push_when_threshold_met_no_campaign(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router, pushes = _build_capturing()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.5,
+    )
+    _seed_class(db)
+    fixed_now = _freeze_time_to_fixed_august(monkeypatch)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01", now=fixed_now)
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    res = _call(router, "POST", "/admin/attendance/sessions/{session_id}/close",
+                session_id="ses_1", admin=_Admin())
+    assert res["goal_reached_sent"] == 1
+    assert res["monthly_reward_ready_sent"] == 0  # no campaign attached
+    goal_pushes = [p for p in pushes if p["title"] and "goal" in p["title"].lower()]
+    assert len(goal_pushes) == 1
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_close_fires_both_pushes_when_a_live_campaign_is_attached(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router, pushes = _build_capturing()
+    cid = _seed_campaign(db, name="August Attendance Bonus", points=50)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.5,
+        monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    fixed_now = _freeze_time_to_fixed_august(monkeypatch)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01", now=fixed_now)
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    res = _call(router, "POST", "/admin/attendance/sessions/{session_id}/close",
+                session_id="ses_1", admin=_Admin())
+    assert res["goal_reached_sent"] == 1
+    assert res["monthly_reward_ready_sent"] == 1
+    assert len(pushes) == 2
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_close_never_resends_goal_reached_or_reward_ready_same_month(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router, pushes = _build_capturing()
+    cid = _seed_campaign(db, name="August Attendance Bonus", points=50)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.5,
+        monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    fixed_now = _freeze_time_to_fixed_august(monkeypatch)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01", now=fixed_now)
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close",
+          session_id="ses_1", admin=_Admin())
+    assert len(pushes) == 2
+
+    # A second session closes for the same student, same month — already
+    # eligible from the first close, must never re-notify.
+    _seed_open_session(db, sid="ses_2", slug="s2", date="2026-08-02", now=fixed_now)
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s2"), student=_Student("stu_alice"))
+    res2 = _call(router, "POST", "/admin/attendance/sessions/{session_id}/close",
+                 session_id="ses_2", admin=_Admin())
+    assert res2["goal_reached_sent"] == 0
+    assert res2["monthly_reward_ready_sent"] == 0
+    assert len(pushes) == 2  # unchanged
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_close_no_push_when_below_threshold(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router, pushes = _build_capturing()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.99,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01")
+    # stu_alice never checks in — 0% this month, well below 99%. Session
+    # close still legitimately fires ITS OWN unrelated absentee pushes
+    # (miss_followup etc.) — this test only asserts the NEW monthly
+    # goal/reward pushes stay silent, not that close() sends nothing at all.
+    res = _call(router, "POST", "/admin/attendance/sessions/{session_id}/close",
+                session_id="ses_1", admin=_Admin())
+    assert res["goal_reached_sent"] == 0
+    assert res["monthly_reward_ready_sent"] == 0
+    assert not any("goal" in p["title"].lower() or "reward" in p["title"].lower() for p in pushes)
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_close_no_push_when_monthly_reward_disabled(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router, pushes = _build_capturing()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=False, monthly_reward_threshold_pct=0.5,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-01")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    res = _call(router, "POST", "/admin/attendance/sessions/{session_id}/close",
+                session_id="ses_1", admin=_Admin())
+    assert res["goal_reached_sent"] == 0
+    assert res["monthly_reward_ready_sent"] == 0
+    assert len(pushes) == 0
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Fairness + admin control — the 10 required scenarios from the mid-month-
+# launch / session-exception / correction directive, each named to the
+# scenario it proves. Some share setup with tests above; these exist so the
+# exact scenario list is traceable one-to-one against real route behavior.
+# ─────────────────────────────────────────────────────────────────────────
+def test_scenario1_mid_month_launch_attend_every_eligible_class_is_eligible(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.85,
+        attendance_cycle_start="2026-08-18",
+    )
+    _seed_class(db)
+    # Pre-launch sessions the student never attended.
+    _seed_open_session(db, sid="ses_pre1", slug="p1", date="2026-08-01")
+    _seed_open_session(db, sid="ses_pre2", slug="p2", date="2026-08-05")
+    # Post-launch sessions, attended.
+    _seed_open_session(db, sid="ses_post1", slug="q1", date="2026-08-18")
+    _seed_open_session(db, sid="ses_post2", slug="q2", date="2026-08-20")
+    for slug in ("q1", "q2"):
+        _call(router, "POST", "/attendance/checkin",
+              payload=att.CheckInIn(slug=slug), student=_Student("stu_alice"))
+    for sid in ("ses_pre1", "ses_pre2", "ses_post1", "ses_post2"):
+        _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["stats"]["total"] == 2  # only the post-launch sessions
+    assert res["stats"]["attendance_pct"] == 100.0
+    assert res["eligible"] is True
+    assert res["cycle_start"] == "2026-08-18"
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_scenario2_no_attendance_before_launch_is_never_penalized(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.85,
+        attendance_cycle_start="2026-08-18",
+    )
+    _seed_class(db)
+    # Three pre-launch sessions the student missed — would tank the
+    # percentage to 0% if counted.
+    for i, sid in enumerate(("ses_pre1", "ses_pre2", "ses_pre3")):
+        _seed_open_session(db, sid=sid, slug=f"pre{i}", date="2026-08-05")
+        _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["stats"]["total"] == 0  # pre-launch sessions never counted at all
+    assert res["stats"]["attendance_pct"] == 0.0
+    # Zero denominator reads as "no classes yet", not a failed 0% — same
+    # state as before Attendance existed, never a fabricated penalty.
+    assert res["eligible"] is False
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_scenario3_teacher_cancels_class_excludes_it_from_denominator(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(monthly_reward_threshold_pct=0.5)
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-10")
+    _seed_open_session(db, sid="ses_2", slug="s2", date="2026-08-12")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    # Teacher cancels ses_2 (public holiday) before it would otherwise close.
+    r = _call(router, "PATCH", "/admin/attendance/sessions/{session_id}/exception",
+              session_id="ses_2",
+              payload=att.SessionExceptionIn(exception="cancelled", reason="Public holiday"),
+              admin=_Admin())
+    assert r["exception"] == "cancelled"
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_2", admin=_Admin())
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["stats"]["total"] == 1  # not 2 — the cancelled class isn't in the denominator
+    assert res["stats"]["attendance_pct"] == 100.0
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_scenario4_teacher_unavailable_never_marks_students_absent(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings()
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-10")
+    _call(router, "PATCH", "/admin/attendance/sessions/{session_id}/exception",
+          session_id="ses_1",
+          payload=att.SessionExceptionIn(exception="teacher_unavailable", reason="Teacher sick"),
+          admin=_Admin())
+    res = _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    assert res["absent_count"] == 0
+    assert res["excepted"] == "teacher_unavailable"
+    # No attendance_records row was ever written for the roster student —
+    # not "absent", not anything — a class that never happened leaves no
+    # false record behind.
+    assert db[att.COLL_RECORDS].docs.get("ses_1:stu_alice") is None
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_scenario5_correction_fixes_a_wrongly_recorded_absence_and_recalculates(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(monthly_reward_threshold_pct=0.5)
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-10")
+    # Student never checked in (automatic check-in failed) — closes absent.
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    before = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                   class_id=None, student=_Student("stu_alice"))
+    assert before["stats"]["attendance_pct"] == 0.0
+    corr = _call(router, "PATCH", "/admin/attendance/records/{session_id}/{student_id}",
+                session_id="ses_1", student_id="stu_alice",
+                payload=att.RecordCorrectionIn(
+                    status="present_full",
+                    reason="Student attended but automatic check-in failed; teacher confirmed."),
+                admin=_Admin())
+    assert corr["old_status"] == att.ST_ABSENT
+    assert corr["new_status"] == "present_full"
+    after = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                  class_id=None, student=_Student("stu_alice"))
+    # No separate "recalculate" step was called — stats.total/attended come
+    # straight from the corrected attendance_records row.
+    assert after["stats"]["attendance_pct"] == 100.0
+    audit = _call(router, "GET", "/admin/attendance/audit", student_id="stu_alice",
+                  session_id=None, limit=10, admin=_Admin())
+    entries = [e for e in audit["entries"] if e["action"] == "record_correction"]
+    assert len(entries) == 1
+    assert entries[0]["old_value"] == att.ST_ABSENT
+    assert entries[0]["new_value"] == "present_full"
+    assert entries[0]["by"] == "admin@example.com"
+    assert "check-in failed" in entries[0]["reason"]
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_scenario6_correction_crosses_threshold_reward_becomes_eligible(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    cid = _seed_campaign(db, name="August Attendance Bonus", points=50)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.85,
+        monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-10")
+    _seed_open_session(db, sid="ses_2", slug="s2", date="2026-08-12")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    # ses_2 never checked in — 50% before correction, below the 85% goal.
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_2", admin=_Admin())
+    before = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                   class_id=None, student=_Student("stu_alice"))
+    assert before["eligible"] is False
+    assert before["can_claim"] is False
+    _call(router, "PATCH", "/admin/attendance/records/{session_id}/{student_id}",
+          session_id="ses_2", student_id="stu_alice",
+          payload=att.RecordCorrectionIn(status="present_full", reason="Confirmed attendance."),
+          admin=_Admin())
+    after = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                  class_id=None, student=_Student("stu_alice"))
+    assert after["stats"]["attendance_pct"] == 100.0
+    assert after["eligible"] is True
+    assert after["can_claim"] is True  # reward becomes claimable immediately, no manual step
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_scenario7_student_remains_below_threshold_reward_stays_locked(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    cid = _seed_campaign(db)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.85,
+        monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-10")
+    _seed_open_session(db, sid="ses_2", slug="s2", date="2026-08-12")
+    _seed_open_session(db, sid="ses_3", slug="s3", date="2026-08-14")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    for sid in ("ses_1", "ses_2", "ses_3"):
+        _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["stats"]["attendance_pct"] < 85.0
+    assert res["eligible"] is False
+    assert res["can_claim"] is False
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_scenario8_new_month_starts_at_zero_previous_month_stays_historical(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings()
+    _seed_class(db)
+    fixed_now = _freeze_time_to_fixed_august(monkeypatch)
+    _seed_open_session(db, sid="ses_aug", slug="a1", date="2026-08-10", now=fixed_now)
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="a1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_aug", admin=_Admin())
+    current_period = att._utcnow().strftime("%Y-%m")
+    prev_period = att._shift_period(current_period, 1)
+    res = _call(router, "GET", "/attendance/monthly-history", months=2, class_id=None,
+                student=_Student("stu_alice"))
+    by_period = {m["period"]: m for m in res["months"]}
+    assert by_period[current_period]["stats"]["total"] == 1
+    assert by_period[current_period]["stats"]["attendance_pct"] == 100.0
+    # The prior month has no sessions at all — reads as a fresh 0%, never
+    # carrying the current month's percentage backward or forward across
+    # the boundary either way.
+    assert by_period[prev_period]["stats"]["total"] == 0
+    assert by_period[prev_period]["stats"]["attendance_pct"] == 0.0
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_scenario9_claim_credits_real_points_and_blocks_duplicate_claims(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    cid = _seed_campaign(db, name="August Attendance Bonus", points=50)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.5,
+        monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-10")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    # Session close already fired one wallet credit via the separate legacy
+    # per-session base_attendance_points flow (Layer A) — a distinct system
+    # from the monthly reward (Layer B, see the "Sunday Rewards" audit). The
+    # monthly claim below adds a SECOND, separate credit for the real
+    # configured campaign.
+    calls_after_close = wallet.calls
+    res1 = _call(router, "POST", "/attendance/rewards/monthly/claim",
+                payload={"period": "2026-08"}, student=_Student("stu_alice"))
+    assert res1["ok"] is True
+    assert res1["already_claimed"] is False
+    assert res1["points"] == 50
+    assert wallet.calls == calls_after_close + 1
+    # Retry (double-tap, refresh, retry-after-timeout) must never double-credit.
+    res2 = _call(router, "POST", "/attendance/rewards/monthly/claim",
+                payload={"period": "2026-08"}, student=_Student("stu_alice"))
+    assert res2["already_claimed"] is True
+    assert res2["points"] == 50
+    assert wallet.calls == calls_after_close + 1  # never called again on retry
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_scenario10_admin_changes_configured_reward_student_sees_the_new_real_reward(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    cid_a = _seed_campaign(db, campaign_id="lrc_a", name="Sunday Rewards", points=1)
+    cid_b = _seed_campaign(db, campaign_id="lrc_b", name="September Champion", points=75)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.0,
+        monthly_reward_campaign_id=cid_a,
+    )
+    res_a = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                  class_id=None, student=_Student("stu_alice"))
+    assert res_a["reward_name"] == "Sunday Rewards"
+    assert res_a["reward_points"] == 1
+    # Admin switches the attached campaign.
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID]["monthly_reward_campaign_id"] = cid_b
+    res_b = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                  class_id=None, student=_Student("stu_alice"))
+    assert res_b["reward_name"] == "September Champion"
+    assert res_b["reward_points"] == 75  # never the stale campaign A value
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Admin control surface — audit trail + narrow behaviors not already
+# covered by the 10 scenario tests above.
+# ─────────────────────────────────────────────────────────────────────────
+def test_cycle_start_change_is_audited_with_old_and_new_value(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings()
+    current = _call(router, "GET", "/admin/attendance/settings", admin=_Admin())["settings"]
+    current["attendance_cycle_start"] = "2026-08-18"
+    _call(router, "PUT", "/admin/attendance/settings",
+          payload=att.SettingsIn(settings=current), admin=_Admin())
+    audit = _call(router, "GET", "/admin/attendance/audit", student_id=None, session_id=None,
+                  limit=10, admin=_Admin())
+    entries = [e for e in audit["entries"] if e["action"] == "cycle_start_change"]
+    assert len(entries) == 1
+    assert entries[0]["old_value"] is None
+    assert entries[0]["new_value"] == "2026-08-18"
+    assert entries[0]["by"] == "admin@example.com"
+    # Saving again with the SAME value must never write a redundant entry.
+    _call(router, "PUT", "/admin/attendance/settings",
+          payload=att.SettingsIn(settings=current), admin=_Admin())
+    audit2 = _call(router, "GET", "/admin/attendance/audit", student_id=None, session_id=None,
+                   limit=10, admin=_Admin())
+    assert len([e for e in audit2["entries"] if e["action"] == "cycle_start_change"]) == 1
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_session_exception_change_is_audited_with_reason():
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings()
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-10")
+    _call(router, "PATCH", "/admin/attendance/sessions/{session_id}/exception",
+          session_id="ses_1",
+          payload=att.SessionExceptionIn(exception="holiday", reason="National holiday"),
+          admin=_Admin())
+    audit = _call(router, "GET", "/admin/attendance/audit", student_id=None, session_id="ses_1",
+                  limit=10, admin=_Admin())
+    entries = [e for e in audit["entries"] if e["action"] == "session_exception"]
+    assert len(entries) == 1
+    assert entries[0]["old_value"] is None
+    assert entries[0]["new_value"] == "holiday"
+    assert entries[0]["reason"] == "National holiday"
+
+
+def test_session_exception_can_be_cleared_back_to_counting_normally():
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings()
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-10")
+    _call(router, "PATCH", "/admin/attendance/sessions/{session_id}/exception",
+          session_id="ses_1",
+          payload=att.SessionExceptionIn(exception="cancelled", reason="Mistake"),
+          admin=_Admin())
+    r = _call(router, "PATCH", "/admin/attendance/sessions/{session_id}/exception",
+              session_id="ses_1",
+              payload=att.SessionExceptionIn(exception=None, reason="Reinstated"),
+              admin=_Admin())
+    assert r["exception"] is None
+    session = db[att.COLL_SESSIONS].docs["ses_1"]
+    assert session["exception"] is None
+
+
+def test_record_correction_requires_a_non_empty_reason():
+    db, router = _build()
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-10")
+    try:
+        _call(router, "PATCH", "/admin/attendance/records/{session_id}/{student_id}",
+              session_id="ses_1", student_id="stu_alice",
+              payload=att.RecordCorrectionIn(status="present_full", reason="   "),
+              admin=_Admin())
+        assert False, "expected HTTPException"
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+
+
+def test_monthly_reward_preview_accepts_candidate_cycle_start_without_persisting_it():
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(attendance_cycle_start=None)
+    _seed_class(db, roster=("stu_alice", "stu_bob"))
+    _seed_open_session(db, sid="ses_pre", slug="p1", date="2026-08-01")
+    _seed_open_session(db, sid="ses_post", slug="p2", date="2026-08-18")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="p1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="p2"), student=_Student("stu_alice"))
+    for sid in ("ses_pre", "ses_post"):
+        _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+    # Preview WITHOUT a candidate override reflects the saved (None) cycle_start.
+    no_override = _call(router, "GET", "/admin/attendance/monthly-reward/preview",
+                        threshold_pct=1.0, month="2026-08", class_id=None,
+                        cycle_start=None, admin=_Admin())
+    assert no_override["qualifying"] == 1  # alice hit 100% across both sessions
+    # Settings on disk are untouched by a preview call.
+    assert db[att.COLL_SETTINGS].docs[att.SETTINGS_ID].get("attendance_cycle_start") is None
+    # Preview WITH a candidate override shows what would happen if that date
+    # were saved, without ever writing it — alice would then only have the
+    # post-launch session (100%), bob has zero eligible sessions either way.
+    with_override = _call(router, "GET", "/admin/attendance/monthly-reward/preview",
+                          threshold_pct=1.0, month="2026-08", class_id=None,
+                          cycle_start="2026-08-18", admin=_Admin())
+    assert with_override["cycle_start"] == "2026-08-18"
+    assert with_override["qualifying"] == 1
+    assert db[att.COLL_SETTINGS].docs[att.SETTINGS_ID].get("attendance_cycle_start") is None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Final verification pass — explicit numeric proofs, cross-month isolation,
+# and one full end-to-end acceptance test, per the follow-up business-rule
+# review (do not merge until these are proven, not just asserted).
+# ─────────────────────────────────────────────────────────────────────────
+def test_numeric_proof_6_of_7_eligible_sessions_is_85_7_pct_and_meets_85_pct_goal():
+    stats = att.compute_monthly_stats([att.ST_PRESENT_FULL] * 6 + [att.ST_ABSENT] * 1)
+    assert stats["total"] == 7
+    assert stats["attendance_pct"] == 85.7
+    elig = att.compute_monthly_eligibility(stats, 0.85)
+    assert elig["met"] is True
+
+
+def test_numeric_proof_5_of_7_eligible_sessions_is_71_4_pct_and_misses_85_pct_goal():
+    stats = att.compute_monthly_stats([att.ST_PRESENT_FULL] * 5 + [att.ST_ABSENT] * 2)
+    assert stats["total"] == 7
+    assert stats["attendance_pct"] == 71.4
+    elig = att.compute_monthly_eligibility(stats, 0.85)
+    assert elig["met"] is False
+
+
+def test_numeric_proof_6_of_8_eligible_sessions_is_75_pct_and_misses_85_pct_goal():
+    stats = att.compute_monthly_stats([att.ST_PRESENT_FULL] * 6 + [att.ST_ABSENT] * 2)
+    assert stats["total"] == 8
+    assert stats["attendance_pct"] == 75.0
+    elig = att.compute_monthly_eligibility(stats, 0.85)
+    assert elig["met"] is False
+
+
+def test_numeric_proof_via_the_real_route_not_just_the_pure_function(monkeypatch):
+    """Same 6/7 = 85.7% proof, but through the actual HTTP route (real
+    sessions, real check-ins, real close), not a direct compute_* call --
+    proves the wiring, not just the formula in isolation."""
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(monthly_reward_threshold_pct=0.85)
+    _seed_class(db)
+    for i in range(7):
+        sid = f"ses_{i}"
+        _seed_open_session(db, sid=sid, slug=f"s{i}", date="2026-08-10")
+        if i < 6:  # attend the first 6, miss the 7th
+            _call(router, "POST", "/attendance/checkin",
+                  payload=att.CheckInIn(slug=f"s{i}"), student=_Student("stu_alice"))
+        _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["stats"]["total"] == 7
+    assert res["stats"]["attendance_pct"] == 85.7
+    assert res["eligible"] is True
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_cancelled_session_is_provably_never_left_in_the_denominator(monkeypatch):
+    """8 scheduled classes, 1 cancelled -> denominator must be 7, never 8,
+    proven through the real route end to end."""
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(monthly_reward_threshold_pct=0.85)
+    _seed_class(db)
+    for i in range(8):
+        sid = f"ses_{i}"
+        _seed_open_session(db, sid=sid, slug=f"s{i}", date="2026-08-10")
+        if i == 7:
+            _call(router, "PATCH", "/admin/attendance/sessions/{session_id}/exception",
+                  session_id=sid, payload=att.SessionExceptionIn(exception="cancelled", reason="Holiday"),
+                  admin=_Admin())
+        elif i < 6:
+            _call(router, "POST", "/attendance/checkin",
+                  payload=att.CheckInIn(slug=f"s{i}"), student=_Student("stu_alice"))
+        _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["stats"]["total"] == 7  # 8 scheduled minus the 1 cancelled -- never 8
+    assert res["stats"]["attendance_pct"] == 85.7
+    assert res["eligible"] is True
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_cycle_start_does_not_leak_into_a_later_month(monkeypatch):
+    """A cycle_start set for the August launch must not depend on August
+    forever -- September is a normal month with no exclusion, even though
+    the SAME cycle_start value is still saved in settings. The filter is
+    effectively "current month + active cycle boundary where applicable",
+    not a global cutoff, because every September date already string-sorts
+    after an August cycle_start."""
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    db, router = _build()
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(attendance_cycle_start="2026-08-18")
+    _seed_class(db)
+    # September session dated BEFORE the "18" numeral -- if the filter were
+    # a naive "day-of-month >= 18" rule instead of a real date/string
+    # comparison, this could be wrongly excluded. It must count fully.
+    _seed_open_session(db, sid="ses_sep_early", slug="se1", date="2026-09-05")
+    _call(router, "POST", "/attendance/checkin",
+          payload=att.CheckInIn(slug="se1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_sep_early", admin=_Admin())
+    res = _call(router, "GET", "/attendance/monthly-summary", month="2026-09",
+                class_id=None, student=_Student("stu_alice"))
+    assert res["stats"]["total"] == 1
+    assert res["stats"]["attendance_pct"] == 100.0
+    assert res["cycle_start"] == "2026-08-18"  # the saved value is still echoed back...
+    # ...but it had zero exclusionary effect on September's own sessions.
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_full_acceptance_scenario_mid_august_launch_with_cancelled_class_and_claim(monkeypatch):
+    """One complete end-to-end walk of the exact accepted scenario:
+    launch 18 Aug -> 2 pre-launch August classes (excluded) -> 8 post-
+    launch classes with 1 cancelled -> 7 eligible -> student attends 6/7
+    (85.7%) -> eligible -> real configured reward appears -> claims ->
+    real points credited -> wallet notified -> congratulations push fires
+    exactly once, never on retry -> August stays historical -> September
+    starts at 0%."""
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router, pushes = _build_capturing(wallet=wallet)
+    cid = _seed_campaign(db, campaign_id="lrc_aug_real", name="August Attendance Champion", points=40)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        attendance_cycle_start="2026-08-18",
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.85,
+        monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+
+    # 2 pre-launch classes -- never attended, must not penalize anything.
+    _seed_open_session(db, sid="ses_pre1", slug="pre1", date="2026-08-01")
+    _seed_open_session(db, sid="ses_pre2", slug="pre2", date="2026-08-10")
+    for sid in ("ses_pre1", "ses_pre2"):
+        _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+
+    # 8 post-launch classes: 1 cancelled, attend 6 of the remaining 7.
+    post_launch_ids = [f"ses_post{i}" for i in range(8)]
+    for i, sid in enumerate(post_launch_ids):
+        _seed_open_session(db, sid=sid, slug=f"post{i}", date="2026-08-19")
+        if i == 7:
+            _call(router, "PATCH", "/admin/attendance/sessions/{session_id}/exception",
+                  session_id=sid, payload=att.SessionExceptionIn(exception="cancelled", reason="Public holiday"),
+                  admin=_Admin())
+        elif i < 6:
+            _call(router, "POST", "/attendance/checkin",
+                  payload=att.CheckInIn(slug=f"post{i}"), student=_Student("stu_alice"))
+        _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+
+    summary = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                    class_id=None, student=_Student("stu_alice"))
+    assert summary["stats"]["total"] == 7           # 2 pre-launch excluded, 1 cancelled excluded
+    assert summary["stats"]["attended"] == 6
+    assert summary["stats"]["attendance_pct"] == 85.7
+    assert summary["eligible"] is True
+    assert summary["reward_configured"] is True
+    assert summary["reward_name"] == "August Attendance Champion"  # the REAL configured reward
+    assert summary["reward_points"] == 40
+    assert summary["can_claim"] is True
+
+    calls_before_claim = wallet.calls
+    pushes.clear()
+    claim = _call(router, "POST", "/attendance/rewards/monthly/claim",
+                  payload={"period": "2026-08"}, student=_Student("stu_alice"))
+    assert claim["ok"] is True
+    assert claim["points"] == 40
+    assert wallet.calls == calls_before_claim + 1  # real points credited via the trusted wallet path
+    congrats = [p for p in pushes if "reward" in p["title"].lower() or "attendance" in p["title"].lower()]
+    assert len(congrats) == 1  # congratulations push fires exactly once
+
+    # Retry must never double-credit or double-notify.
+    pushes.clear()
+    retry = _call(router, "POST", "/attendance/rewards/monthly/claim",
+                  payload={"period": "2026-08"}, student=_Student("stu_alice"))
+    assert retry["already_claimed"] is True
+    assert wallet.calls == calls_before_claim + 1
+    assert len(pushes) == 0
+
+    # August stays historical — querying it again afterward returns the
+    # exact same real numbers, never overwritten by the claim.
+    august_again = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                         class_id=None, student=_Student("stu_alice"))
+    assert august_again["stats"]["total"] == 7
+    assert august_again["stats"]["attendance_pct"] == 85.7
+    assert august_again["eligible"] is True
+    # September starts fresh at 0% — no session exists there yet, and
+    # nothing about August's percentage or the claim carries forward.
+    september = _call(router, "GET", "/attendance/monthly-summary", month="2026-09",
+                      class_id=None, student=_Student("stu_alice"))
+    assert september["stats"]["total"] == 0
+    assert september["stats"]["attendance_pct"] == 0.0
+    assert september["already_claimed"] is False
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_full_acceptance_scenario_companion_5_of_7_stays_locked(monkeypatch):
+    """Same shape as the 6/7 acceptance scenario, but the student only
+    attends 5 of the 7 eligible classes (71.4%) -- the reward must remain
+    locked, never claimable, never credited."""
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    cid = _seed_campaign(db, campaign_id="lrc_aug_real", name="August Attendance Champion", points=40)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        attendance_cycle_start="2026-08-18",
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.85,
+        monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    _seed_open_session(db, sid="ses_pre1", slug="pre1", date="2026-08-01")
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_pre1", admin=_Admin())
+
+    post_launch_ids = [f"ses_post{i}" for i in range(8)]
+    for i, sid in enumerate(post_launch_ids):
+        _seed_open_session(db, sid=sid, slug=f"post{i}", date="2026-08-19")
+        if i == 7:
+            _call(router, "PATCH", "/admin/attendance/sessions/{session_id}/exception",
+                  session_id=sid, payload=att.SessionExceptionIn(exception="cancelled", reason="Public holiday"),
+                  admin=_Admin())
+        elif i < 5:  # only 5 of the 7 eligible classes attended
+            _call(router, "POST", "/attendance/checkin",
+                  payload=att.CheckInIn(slug=f"post{i}"), student=_Student("stu_alice"))
+        _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+
+    summary = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                    class_id=None, student=_Student("stu_alice"))
+    assert summary["stats"]["total"] == 7
+    assert summary["stats"]["attended"] == 5
+    assert summary["stats"]["attendance_pct"] == 71.4
+    assert summary["eligible"] is False
+    assert summary["can_claim"] is False
+
+    # 5 present sessions already fired the separate legacy per-session
+    # base_attendance_points credit at close time (a distinct system from
+    # the monthly campaign reward) -- capture that baseline before
+    # asserting the monthly claim itself adds nothing further.
+    calls_before_claim_attempt = wallet.calls
+    try:
+        _call(router, "POST", "/attendance/rewards/monthly/claim",
+              payload={"period": "2026-08"}, student=_Student("stu_alice"))
+        assert False, "expected HTTPException -- reward must stay locked below threshold"
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 403
+    assert wallet.calls == calls_before_claim_attempt  # the monthly reward itself was never credited
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# P0 rebuild — Layer A (configurable per-session attendance points) vs.
+# Layer B (monthly reward claim). These two systems must never be
+# interchangeable: no daily/per-session claim button, exactly one monthly
+# claim, real accumulated Layer A total exposed for transparency.
+# ─────────────────────────────────────────────────────────────────────────
+def test_base_attendance_points_default_is_one():
+    assert att.default_settings()["base_attendance_points"] == 1
+
+
+def test_base_attendance_points_setting_rejects_values_outside_1_2_3():
+    db, router = _build()
+    for bad in (0, 4, 5, -1):
+        try:
+            _call(router, "PUT", "/admin/attendance/settings",
+                  payload=att.SettingsIn(settings={"base_attendance_points": bad}), admin=_Admin())
+            assert False, f"expected 400 for base_attendance_points={bad}"
+        except Exception as exc:
+            assert getattr(exc, "status_code", None) == 400
+    for good in (1, 2, 3):
+        res = _call(router, "PUT", "/admin/attendance/settings",
+                    payload=att.SettingsIn(settings={"base_attendance_points": good}), admin=_Admin())
+        assert res["settings"]["base_attendance_points"] == good
+
+
+def test_a_default_one_point_per_qualifying_present_session_no_claim_button(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings()  # base_attendance_points defaults to 1
+    _seed_class(db)
+    sid = _seed_open_session(db, date="2026-08-19")
+    _call(router, "POST", "/attendance/checkin", payload=att.CheckInIn(slug="abc123"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+
+    summary = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                    class_id=None, student=_Student("stu_alice"))
+    assert summary["base_attendance_points"] == 1
+    assert summary["attendance_points_this_month"] == 1
+    # This is a point accumulation, not a reward claim -- no claim state
+    # exists for it at all (reward_enabled defaults False in _v2_settings).
+    assert summary["reward_enabled"] is False
+    assert summary["already_claimed"] is False
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_b_two_points_per_session_configuration(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(base_attendance_points=2)
+    _seed_class(db)
+    sid = _seed_open_session(db, date="2026-08-19")
+    _call(router, "POST", "/attendance/checkin", payload=att.CheckInIn(slug="abc123"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+
+    summary = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                    class_id=None, student=_Student("stu_alice"))
+    assert summary["attendance_points_this_month"] == 2
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_c_three_points_per_session_configuration(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(base_attendance_points=3)
+    _seed_class(db)
+    sid = _seed_open_session(db, date="2026-08-19")
+    _call(router, "POST", "/attendance/checkin", payload=att.CheckInIn(slug="abc123"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+
+    summary = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                    class_id=None, student=_Student("stu_alice"))
+    assert summary["attendance_points_this_month"] == 3
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_d_reprocessing_the_same_session_close_never_double_credits_points(monkeypatch):
+    """Duplicate check-in / retried close / heartbeat re-close must never
+    double the per-session point credit -- the SAME idem_key protection
+    wallet.credit() already enforces for the wallet balance also keeps the
+    attendance_records.points_credited mirror from drifting (a $set, not a
+    $inc, so re-processing always re-writes the same value)."""
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(base_attendance_points=2)
+    _seed_class(db)
+    sid = _seed_open_session(db, date="2026-08-19")
+    _call(router, "POST", "/attendance/checkin", payload=att.CheckInIn(slug="abc123"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+    calls_after_first_close = wallet.calls
+
+    # Re-close the same (already-closed) session a second time -- exactly
+    # what a heartbeat retry or a double-submitted admin action would do.
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+
+    summary = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                    class_id=None, student=_Student("stu_alice"))
+    assert summary["attendance_points_this_month"] == 2  # not 4
+    assert len(wallet.seen) == 1  # one idempotency_key, one real credit
+    assert wallet.seen[f"attendance:{sid}:stu_alice"] == 2
+
+
+def test_e_five_sessions_at_two_points_accumulate_ten_not_five_claims(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(base_attendance_points=2)
+    _seed_class(db)
+    for i in range(5):
+        sid = _seed_open_session(db, sid=f"ses_{i}", slug=f"slug{i}", date="2026-08-19")
+        _call(router, "POST", "/attendance/checkin", payload=att.CheckInIn(slug=f"slug{i}"), student=_Student("stu_alice"))
+        _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+
+    summary = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                    class_id=None, student=_Student("stu_alice"))
+    assert summary["attendance_points_this_month"] == 10
+    # No claim records exist anywhere -- per-session credit never creates one.
+    assert len(db[att.COLL_CLAIMS].docs) == 0
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_f_g_h_layer_a_and_layer_b_coexist_without_interfering(monkeypatch):
+    """One flow proving Layer A (per-session points) and Layer B (monthly
+    reward) are fully independent: points accumulate every session
+    regardless of the monthly reward's own locked/eligible/claimed state,
+    and attending MORE sessions after the monthly reward is claimed keeps
+    crediting Layer A points but never reopens or duplicates the Layer B
+    claim (TEST F: locked->eligible: TEST G: claim exactly once; TEST H:
+    attend again after claim)."""
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    cid = _seed_campaign(db, campaign_id="lrc_aug", name="August Champion", points=40)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        base_attendance_points=2,
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.85,
+        monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+
+    # Session 1 -- below threshold alone, but Layer A already credits.
+    sid1 = _seed_open_session(db, sid="ses_1", slug="s1", date="2026-08-19")
+    _call(router, "POST", "/attendance/checkin", payload=att.CheckInIn(slug="s1"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_1", admin=_Admin())
+    mid = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+               class_id=None, student=_Student("stu_alice"))
+    assert mid["attendance_points_this_month"] == 2
+    assert mid["eligible"] is True  # 1/1 = 100% -- TEST F: LOCKED -> ELIGIBLE
+    assert mid["can_claim"] is True
+    assert mid["already_claimed"] is False
+
+    # TEST G -- claim exactly once.
+    claim = _call(router, "POST", "/attendance/rewards/monthly/claim",
+                  payload={"period": "2026-08"}, student=_Student("stu_alice"))
+    assert claim["ok"] is True
+    assert claim["points"] == 40
+    after_claim = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                        class_id=None, student=_Student("stu_alice"))
+    assert after_claim["already_claimed"] is True
+    assert after_claim["can_claim"] is False
+
+    # TEST H -- attend a second session AFTER the monthly claim. Layer A
+    # keeps accumulating; Layer B must NOT become claimable again.
+    sid2 = _seed_open_session(db, sid="ses_2", slug="s2", date="2026-08-20")
+    _call(router, "POST", "/attendance/checkin", payload=att.CheckInIn(slug="s2"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id="ses_2", admin=_Admin())
+    final = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                 class_id=None, student=_Student("stu_alice"))
+    assert final["attendance_points_this_month"] == 4  # 2 sessions x 2 pts
+    assert final["already_claimed"] is True  # still claimed, never reopened
+    assert final["can_claim"] is False
+    monthly_claim_docs = [d for d in db[att.COLL_CLAIMS].docs.values()
+                          if d.get("idempotency_key", "").startswith("attendance_monthly:")]
+    assert len(monthly_claim_docs) == 1  # exactly one monthly claim, ever
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_i_refresh_returns_stable_state_no_side_effects(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(base_attendance_points=1)
+    _seed_class(db)
+    sid = _seed_open_session(db, date="2026-08-19")
+    _call(router, "POST", "/attendance/checkin", payload=att.CheckInIn(slug="abc123"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+
+    first = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                 class_id=None, student=_Student("stu_alice"))
+    second = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                  class_id=None, student=_Student("stu_alice"))
+    assert first == second  # a plain read, twice, changes nothing
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_k_new_month_resets_points_and_claim_state_but_not_wallet_balance(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    cid = _seed_campaign(db, campaign_id="lrc_aug", name="August Champion", points=40)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(
+        base_attendance_points=2,
+        monthly_reward_enabled=True, monthly_reward_threshold_pct=0.85,
+        monthly_reward_campaign_id=cid,
+    )
+    _seed_class(db)
+    sid = _seed_open_session(db, date="2026-08-19")
+    _call(router, "POST", "/attendance/checkin", payload=att.CheckInIn(slug="abc123"), student=_Student("stu_alice"))
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+    _call(router, "POST", "/attendance/rewards/monthly/claim",
+          payload={"period": "2026-08"}, student=_Student("stu_alice"))
+    points_credited_before_new_month = sum(v for v in wallet.seen.values())
+
+    # September has no sessions yet -- a brand new cycle.
+    september = _call(router, "GET", "/attendance/monthly-summary", month="2026-09",
+                      class_id=None, student=_Student("stu_alice"))
+    assert september["attendance_points_this_month"] == 0
+    assert september["stats"]["total"] == 0
+    assert september["already_claimed"] is False
+    assert september["can_claim"] is False
+    # Already-credited real wallet points from August are never clawed back
+    # just because the month changed -- the wallet has no month concept.
+    assert sum(v for v in wallet.seen.values()) == points_credited_before_new_month
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_late_status_is_documented_as_still_receiving_per_session_points(monkeypatch):
+    """Existing, verified rule (attendance_tools.py _do_close): 'late' is
+    one of the non-absent PRESENT_STATES and is never excluded from the
+    per-session point credit. Locked in explicitly here rather than left
+    an unstated assumption, per the P0 audit requirement not to guess."""
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(base_attendance_points=1)
+    _seed_class(db)
+    sid = _seed_open_session(db, date="2026-08-19")
+    rec_id = f"{sid}:stu_alice"
+    db[att.COLL_RECORDS].docs[rec_id] = {
+        "_id": rec_id, "session_id": sid, "student_id": "stu_alice",
+        "checked_in_at": "2026-08-19T10:20:00+00:00", "checkin_status": att.ST_LATE,
+    }
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+
+    summary = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                    class_id=None, student=_Student("stu_alice"))
+    assert summary["stats"]["late"] == 1
+    assert summary["attendance_points_this_month"] == 1  # late still credits
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
+
+
+def test_absent_never_receives_per_session_points(monkeypatch):
+    monkeypatch.setenv(att.V2_ENV_VAR, "true")
+    wallet = _Wallet()
+    db, router = _build(wallet=wallet)
+    db[att.COLL_SETTINGS].docs[att.SETTINGS_ID] = _v2_settings(base_attendance_points=3)
+    _seed_class(db)
+    sid = _seed_open_session(db, date="2026-08-19")
+    # Nobody checks in -- student is absent.
+    _call(router, "POST", "/admin/attendance/sessions/{session_id}/close", session_id=sid, admin=_Admin())
+
+    summary = _call(router, "GET", "/attendance/monthly-summary", month="2026-08",
+                    class_id=None, student=_Student("stu_alice"))
+    assert summary["stats"]["absent"] == 1
+    assert summary["attendance_points_this_month"] == 0
+    assert wallet.calls == 0
+    monkeypatch.delenv(att.V2_ENV_VAR, raising=False)
