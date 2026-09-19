@@ -4,7 +4,7 @@
  * entirely.
  *
  * Focus: the "blocked cascade" fix. Several display rows share one real
- * backend step (e.g. "Gemini speech recognition" and "Speaker detection"
+ * backend step (e.g. "ElevenLabs speech & word timing" and "Speaker diarization"
  * both mirror the backend's "speech_recognition" step). Before this fix,
  * a failed backend step made every row sharing it show the SAME raw
  * provider error under a different, unrelated label — misleadingly
@@ -43,14 +43,14 @@ test("a failed speech_recognition step shows the real error once, and Speaker de
   };
   render(<PipelinePanel lesson={{ ...LESSON, pipeline }} onChanged={() => {}} />);
 
-  const geminiRow = screen.getByTestId("pipeline-step-2"); // "Gemini speech recognition"
-  expect(geminiRow).toHaveTextContent("Gemini speech recognition");
-  expect(geminiRow).toHaveTextContent("VideoAiError: Gemini returned no parsable segments");
+  const speechRow = screen.getByTestId("pipeline-step-2");
+  expect(speechRow).toHaveTextContent("ElevenLabs speech & word timing");
+  expect(speechRow).toHaveTextContent("VideoAiError: Gemini returned no parsable segments");
 
   const speakerRow = screen.getByTestId("pipeline-step-3"); // "Speaker detection"
-  expect(speakerRow).toHaveTextContent("Speaker detection");
+  expect(speakerRow).toHaveTextContent("Speaker diarization");
   expect(speakerRow).toHaveTextContent("Blocked");
-  expect(speakerRow).toHaveTextContent("Gemini speech recognition failed");
+  expect(speakerRow).toHaveTextContent("ElevenLabs speech & word timing failed");
   // The raw provider error must never be duplicated under this row.
   expect(speakerRow).not.toHaveTextContent("Gemini returned no parsable segments");
 });
@@ -117,7 +117,7 @@ test("the same cascade rule applies to every secondary row sharing a failed back
   for (const i of [7, 8, 9]) { // Vocabulary extraction, Grammar notes, CEFR classification
     const row = screen.getByTestId(`pipeline-step-${i}`);
     expect(row).toHaveTextContent("Blocked");
-    expect(row).toHaveTextContent("Educational analysis failed");
+    expect(row).toHaveTextContent("Gemini teaching analysis failed");
     expect(row).not.toHaveTextContent("transcript too short");
   }
 });
@@ -152,7 +152,7 @@ test("a silent video's skipped steps show an honest reason, never a failure", ()
   expect(screen.queryByText(/Blocked/)).not.toBeInTheDocument();
   expect(screen.queryByText(/^Failed$/)).not.toBeInTheDocument();
 
-  const speechRow = screen.getByTestId("pipeline-step-2"); // "Gemini speech recognition"
+  const speechRow = screen.getByTestId("pipeline-step-2");
   expect(speechRow).toHaveTextContent("no audio track — nothing to transcribe");
 
   const speakerRow = screen.getByTestId("pipeline-step-3"); // "Speaker detection"

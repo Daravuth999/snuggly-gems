@@ -168,12 +168,11 @@ export const SentenceRow = memo(function SentenceRow({ pIdx, sIdx, globalIdx, se
   const [text, setText] = useState("");
   // §2 fix — real gap confirmed by direct comparison against
   // Teleprompter.jsx: this screen's own word rendering only ever checked
-  // the LEGACY numeric confidence.alignment score (ElevenLabs-era), which
-  // gemini-3.5-transcribe NEVER populates for either a measured OR an
-  // interpolated word (see video_word_alignment.py's own "confirmed gap"
-  // docstring) — so every word from the current alignment pipeline
+  // the legacy numeric confidence.alignment score. Providers can instead
+  // supply a measured provenance flag without a numeric score. Without
+  // recognizing that flag, every word from the current alignment pipeline
   // rendered IDENTICALLY here, with zero visual distinction between real
-  // measured timing and Gemini's own estimate. This was never a
+  // measured timing and an estimate. This was never a
   // regression in the Teleprompter's tiered system; Sync Review Studio
   // simply never received it when that system was built. Reused directly
   // (not reimplemented) so the two screens can never silently disagree

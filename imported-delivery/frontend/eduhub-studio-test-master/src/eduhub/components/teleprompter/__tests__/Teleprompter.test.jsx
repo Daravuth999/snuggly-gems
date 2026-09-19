@@ -453,7 +453,7 @@ test("high-confidence real alignment renders the full crisp karaoke word highlig
 
 test("uncertain confidence (interpolated-only timing) falls back to the soft sentence-level highlight, never a crisp word pill", () => {
   render(<Teleprompter sync={UNCERTAIN_SYNC} currentTime={0.5} mode="storytelling" config={{ karaoke: true, sentenceHighlight: true }} />);
-  const word = screen.getByText(/Estimated/);
+  const word = screen.getByText(/^Estimated\s*$/);
   // Never the crisp gold karaoke pill — that would be a false claim of
   // word-level precision the data doesn't support.
   expect(word).not.toHaveStyle({ background: "#D4A843" });
@@ -464,7 +464,7 @@ test("uncertain confidence (interpolated-only timing) falls back to the soft sen
 
 test("uncertain confidence also suppresses the plain word-level highlight fallback (wordHighlight), not just karaoke", () => {
   render(<Teleprompter sync={UNCERTAIN_SYNC} currentTime={0.5} mode="storytelling" config={{ wordHighlight: true, sentenceHighlight: true }} />);
-  const word = screen.getByText(/Estimated/);
+  const word = screen.getByText(/^Estimated\s*$/);
   expect(word).not.toHaveStyle({ color: "#D4A843" });
 });
 

@@ -163,11 +163,11 @@ export async function runPipeline(lessonId, signal) {
   });
 }
 
-/** Manual transcript import (additive alternative to Gemini-from-scratch
+/** Manual transcript import (additive alternative to automatic
  * transcription) — `format` is "srt" or "vtt", `content` is the raw file
  * text. Parses synchronously server-side (a bad file 400s immediately,
  * before anything is scheduled) then runs the same background pipeline
- * the Gemini path uses, minus the Gemini speech-recognition/word-
+ * the automatic path uses, minus the speech-recognition/word-
  * alignment calls. Poll getPipeline() afterwards exactly as for the
  * auto-generate path. */
 export async function importTranscript(lessonId, format, content, signal) {

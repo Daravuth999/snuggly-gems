@@ -65,8 +65,8 @@ const LOW_CONFIDENCE = 0.7;
 // A word only earns CRISP, per-word karaoke precision when it carries
 // EITHER a real measured alignment confidence at or above this bar (old
 // ElevenLabs-Scribe-produced lessons already in the database — preserved
-// exactly, never migrated or recomputed) OR the newer `measured: true`
-// provenance flag (2026-09 Gemini-only redesign — see below). Gemini's own
+// exactly, never migrated or recomputed) OR the `measured: true`
+// provenance flag supplied by the current alignment engine. An
 // interpolated estimate (confidence.alignment always None/omitted, no
 // `measured` flag) never qualifies either way, by construction, since an
 // estimate is not a measurement no matter how plausible it looks. 0.6 was
@@ -81,11 +81,11 @@ const HIGH_CONFIDENCE_ALIGNMENT = 0.6;
  * from real per-word alignment evidence, never guessed:
  *   "high"      — every word in the sentence earns real, measured status,
  *                  either via a numeric alignment confidence >=
- *                  HIGH_CONFIDENCE_ALIGNMENT (legacy ElevenLabs-Scribe
-  *                  lessons) or via `word.measured === true`. This is a
+ *                  HIGH_CONFIDENCE_ALIGNMENT (legacy aligned lessons) or
+ *                  via `word.measured === true`. This is a
   *                  plain fact about timing provenance, never a fabricated
-  *                  confidence value standing in for one) —
- *                  the full karaoke experience is earned either way.
+ *                  confidence value standing in for one — the full
+ *                  karaoke experience is earned either way.
  *   "uncertain" — the sentence has words, but at least one lacks either
  *                 signal above (Gemini's interpolated estimate, or a
  *                 genuinely low-confidence legacy match) — falls back to
