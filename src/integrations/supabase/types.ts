@@ -111,6 +111,53 @@ export type Database = {
           },
         ]
       }
+      transcript_words: {
+        Row: {
+          confidence: number | null
+          created_at: string
+          cue_idx: number | null
+          end_ms: number
+          id: string
+          idx: number
+          speaker: string | null
+          start_ms: number
+          text: string
+          video_id: string
+        }
+        Insert: {
+          confidence?: number | null
+          created_at?: string
+          cue_idx?: number | null
+          end_ms: number
+          id?: string
+          idx: number
+          speaker?: string | null
+          start_ms: number
+          text: string
+          video_id: string
+        }
+        Update: {
+          confidence?: number | null
+          created_at?: string
+          cue_idx?: number | null
+          end_ms?: number
+          id?: string
+          idx?: number
+          speaker?: string | null
+          start_ms?: number
+          text?: string
+          video_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "transcript_words_video_id_fkey"
+            columns: ["video_id"]
+            isOneToOne: false
+            referencedRelation: "videos"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       user_roles: {
         Row: {
           created_at: string
