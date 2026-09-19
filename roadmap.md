@@ -1,7 +1,7 @@
 # Roadmap
-
-- [x] Connect the existing ElevenLabs integration for measured word alignment.
-- [x] Store word timings and speaker labels securely for each video.
-- [x] Add a video-synced mobile karaoke teleprompter with glowing active words.
-- [x] Verify real word synchronization end to end — verified with the new ElevenLabs account; teleprompter renders with measured word timings.
-- [x] Switch ElevenLabs to a different account — old blocked connection removed, new one linked and tested (word-level STT returned 200).
+- [x] Preserve the existing GitHub, Vercel, Render, and MongoDB architecture.
+- [ ] Make ElevenLabs Scribe v2 the one-time admin speech and timing engine.
+- [ ] Keep Gemini teaching analysis and unrelated Video Library functions intact.
+- [ ] Refine the mobile karaoke teleprompter and timing-quality indicators.
+- [ ] Verify provider isolation, candidate review safety, and zero AI playback calls.
+- [ ] Package clean frontend and backend source deliverables.
