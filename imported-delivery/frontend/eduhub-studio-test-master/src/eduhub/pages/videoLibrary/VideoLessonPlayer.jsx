@@ -452,7 +452,11 @@ function ScriptOverlay({ sentences, onSeek, onClose }) {
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
         {visible.map((sentence, index) => (
-          <button key={sentence.id || index} type="button" onClick={() => { onSeek(sentence.start); onClose(); }}
+          <button key={sentence.id || index} type="button" onClick={() => {
+            const firstWordStart = sentence.words?.[0]?.start;
+            onSeek(Number.isFinite(Number(sentence.start)) ? Number(sentence.start) : Number(firstWordStart) || 0);
+            onClose();
+          }}
                   className="w-full text-left rounded-lg border border-white/10 bg-white/[0.025] px-3 py-3 hover:bg-white/[0.06]">
             <span className="text-[10px] tabular-nums text-amber-300 mr-2">{fmt(sentence.start)}</span>
             <span className="text-[13px] leading-relaxed text-white/78">{(sentence.words || []).map((word) => word.word).join(" ")}</span>
