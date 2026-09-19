@@ -14,16 +14,175 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      admin_invites: {
+        Row: {
+          created_at: string
+          email: string
+        }
+        Insert: {
+          created_at?: string
+          email: string
+        }
+        Update: {
+          created_at?: string
+          email?: string
+        }
+        Relationships: []
+      }
+      narration_lines: {
+        Row: {
+          audio_ms: number | null
+          audio_path: string | null
+          end_ms: number
+          id: string
+          idx: number
+          language: string
+          start_ms: number
+          text: string
+          video_id: string
+        }
+        Insert: {
+          audio_ms?: number | null
+          audio_path?: string | null
+          end_ms: number
+          id?: string
+          idx: number
+          language?: string
+          start_ms: number
+          text: string
+          video_id: string
+        }
+        Update: {
+          audio_ms?: number | null
+          audio_path?: string | null
+          end_ms?: number
+          id?: string
+          idx?: number
+          language?: string
+          start_ms?: number
+          text?: string
+          video_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "narration_lines_video_id_fkey"
+            columns: ["video_id"]
+            isOneToOne: false
+            referencedRelation: "videos"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      transcript_cues: {
+        Row: {
+          end_ms: number
+          id: string
+          idx: number
+          speaker: string | null
+          start_ms: number
+          text: string
+          video_id: string
+        }
+        Insert: {
+          end_ms: number
+          id?: string
+          idx: number
+          speaker?: string | null
+          start_ms: number
+          text: string
+          video_id: string
+        }
+        Update: {
+          end_ms?: number
+          id?: string
+          idx?: number
+          speaker?: string | null
+          start_ms?: number
+          text?: string
+          video_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "transcript_cues_video_id_fkey"
+            columns: ["video_id"]
+            isOneToOne: false
+            referencedRelation: "videos"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      user_roles: {
+        Row: {
+          created_at: string
+          id: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          role?: Database["public"]["Enums"]["app_role"]
+          user_id?: string
+        }
+        Relationships: []
+      }
+      videos: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          duration_sec: number | null
+          error: string | null
+          id: string
+          narration_language: string
+          status: string
+          storage_path: string
+          title: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          duration_sec?: number | null
+          error?: string | null
+          id?: string
+          narration_language?: string
+          status?: string
+          storage_path: string
+          title: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          duration_sec?: number | null
+          error?: string | null
+          id?: string
+          narration_language?: string
+          status?: string
+          storage_path?: string
+          title?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      has_role: {
+        Args: {
+          _role: Database["public"]["Enums"]["app_role"]
+          _user_id: string
+        }
+        Returns: boolean
+      }
     }
     Enums: {
-      [_ in never]: never
+      app_role: "admin"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -150,6 +309,8 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      app_role: ["admin"],
+    },
   },
 } as const
