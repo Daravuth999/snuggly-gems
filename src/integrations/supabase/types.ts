@@ -186,7 +186,11 @@ export type Database = {
           duration_sec: number | null
           error: string | null
           id: string
+          is_published: boolean
+          lesson_note: string | null
+          lesson_title: string | null
           narration_language: string
+          published_at: string | null
           status: string
           storage_path: string
           title: string
@@ -197,7 +201,11 @@ export type Database = {
           duration_sec?: number | null
           error?: string | null
           id?: string
+          is_published?: boolean
+          lesson_note?: string | null
+          lesson_title?: string | null
           narration_language?: string
+          published_at?: string | null
           status?: string
           storage_path: string
           title: string
@@ -208,7 +216,11 @@ export type Database = {
           duration_sec?: number | null
           error?: string | null
           id?: string
+          is_published?: boolean
+          lesson_note?: string | null
+          lesson_title?: string | null
           narration_language?: string
+          published_at?: string | null
           status?: string
           storage_path?: string
           title?: string
