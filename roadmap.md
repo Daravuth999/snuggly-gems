@@ -13,3 +13,4 @@
 - [x] Verify focused frontend/backend behavior and package one audited V3 ZIP.
 
 - [x] Apply and verify the approved premium Video Library dashboard mockup without changing playback timing or speaker labels.
+- [x] Trace the PWA karaoke mid-story freeze against the working studio and identify the corrective architecture.
