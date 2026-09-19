@@ -1,100 +1,69 @@
-# Video Library precision-sync transformation
+# Video Library Precision Sync Transformation
 
-## Recommendation
-Keep the current EduHub architecture and replace only the speech-timing authority. ElevenLabs Scribe becomes the source of spoken words, word boundaries, confidence, and speaker changes. Gemini remains responsible for scene understanding, Khmer translation, vocabulary, grammar, CEFR level, explanations, and narration planning.
+## Goal
+Upgrade the existing Video Library without replacing its proven architecture: ElevenLabs becomes the one-time speech and word-timing authority, Gemini remains the learning-analysis engine, and the student karaoke experience becomes more polished, mobile-first, and curiosity-driven.
 
-Administrators process each upload once. The approved synchronization document is saved. Student playback reads that saved document locally, so play, replay, seeking, and many simultaneous students create no ElevenLabs or Gemini calls.
+## What stays intact
+- Current CRA PWA, FastAPI/Render backend, MongoDB data, storage, authentication, purchases, progress, notes, analytics, narration, publishing, and admin permissions.
+- Existing canonical `paragraphs → sentences → words` synchronization document.
+- Existing Author Studio, Sync Review Studio, approval/candidate workflow, manual correction tools, and student player.
+- Gemini-generated translation, vocabulary, grammar, CEFR, summaries, explanations, scene understanding, and narration planning.
 
-```text
-Admin upload
-  -> audio extraction
-  -> ElevenLabs: words + exact timings + speakers
-  -> Gemini: teaching content + scene understanding + translation
-  -> one canonical sync document
-  -> review and approval
-  -> publish
-  -> students stream video and read saved timing only
-```
+## Implementation
 
-## Why this fits the existing app
-- Author Studio already has upload, staged processing, synchronization review, manual corrections, approval, publishing, and analytics.
-- Student playback already makes no AI calls.
-- The karaoke engine already uses the media clock, frame-level updates, word lookup, seek/replay recovery, auto-follow, speaker modes, and reduced-motion support.
-- Approved timing is protected: reprocessing creates a candidate and cannot silently replace what students see.
-- Purchases, progress, bookmarks, notes, narration, media storage, and Gemini learning features are separate from timing.
+### 1. Make ElevenLabs the timing authority
+- Activate the existing server-side Scribe provider for transcript text, measured word start/end times, language detection, confidence, and speaker diarization.
+- Call ElevenLabs only during an explicit admin processing or regeneration action.
+- Validate every returned word for non-negative, increasing timestamps before persistence.
+- Keep a feature flag for temporary Gemini timing rollback.
+- If ElevenLabs is unavailable, retain the current estimated timing but label it honestly and prevent publication as precision-synced unless an admin explicitly accepts it.
 
-The failure is isolated to the current two-pass Gemini timing path, where measured words are merged onto an independently generated transcript and unmatched words can fall back to estimated spacing.
+### 2. Preserve the data contract and review safety
+- Normalize Scribe output into the existing synchronization schema rather than changing student-facing APIs.
+- Continue staging reprocessed results as a candidate when an approved version exists.
+- Require admin review and approval before the candidate replaces the published synchronization document.
+- Keep provider, model, measured/estimated provenance, language, confidence, processing time, and word counts in metadata.
 
-## Backend transformation
+### 3. Keep Gemini focused on teaching intelligence
+- Send the persisted transcript to Gemini after speech processing.
+- Preserve grammar explanations, translations, keywords, phrasal verbs, summaries, lesson notes, CEFR analysis, and scene/story enrichment.
+- Do not let Gemini rewrite measured timestamps.
 
-### 1. Promote the existing ElevenLabs adapter
-- Harden the existing Scribe provider rather than introducing a parallel synchronization system.
-- Keep the ElevenLabs key server-side only.
-- Use word timestamps, diarization, language detection, and confidence from Scribe.
-- Add bounded timeouts, safe retries, existing size/duration checks, and sanitized errors.
+### 4. Improve the Author Studio experience
+- Rename Gemini-centric pipeline labels to clearly separate “ElevenLabs speech & word timing” from “Gemini teaching analysis.”
+- Show measured versus estimated timing, detected speakers, language, low-confidence words, duration, and provider status.
+- Add clear Process, Regenerate Timing, Review Candidate, Approve, Reject, and Publish states.
+- Add duration/cost confirmation before paid reprocessing and prevent duplicate submissions for the same media fingerprint.
 
-### 2. Make Scribe the speech source of truth
-- Build the canonical word stream directly from Scribe so every accepted word keeps its measured start and end.
-- Preserve the existing `paragraphs -> sentences -> words` contract.
-- Derive sentence and paragraph bounds from their words.
-- Retain stable sentence IDs so Gemini learning annotations attach without changing timing.
-- Use Gemini after timing exists to enrich the lesson, never to overwrite measured word boundaries.
+### 5. Elevate the mobile student karaoke player
+- Build on the existing media-clock, binary-search, auto-follow, focus-zone, reduced-motion, and tap-to-seek engine rather than rewriting it.
+- Present the current phrase in a focused reading zone with stable word footprints, warm active-word glow, speaker-aware accents, and smooth sentence transitions.
+- Keep upcoming context visible but visually quieter; optionally show Khmer beneath the active English sentence.
+- Show a compact “Audio-synced” indicator for measured timing and a truthful “Estimated timing” state otherwise.
+- Preserve accessibility, reduced motion, responsive layouts, replay, seeking, and playback-speed behavior.
 
-### 3. Preserve compatibility and approved content
-- Existing Gemini-timed lessons continue unchanged.
-- New lessons use ElevenLabs when enabled.
-- Reprocessing an approved lesson continues to create a candidate requiring approval.
-- Store provider version, generated time, alignment version, detected language, speaker count, word count, and confidence summary.
-- Keep unrelated endpoints, storage, authentication, purchases, progress, bookmarks, notes, analytics, and narration untouched.
+### 6. Guarantee low-cost student playback
+- Persist one approved synchronization document with the lesson.
+- Student playback reads only the saved video and timing JSON; it must never import or call ElevenLabs or Gemini.
+- Unlimited students and replays create no additional AI processing charge.
+- Regeneration is admin-only and explicitly initiated.
 
-### 4. Honest failure policy
-- A failed Scribe call must not be presented as precise synchronization.
-- Keep the lesson in an administrator-visible **Timing needs attention** state.
-- Let administrators retry or deliberately continue with clearly labelled estimated timing.
-- Never silently publish estimated timing as measured.
-
-## Author Studio improvements
-- Replace the “Gemini processing” story with truthful stages: **Speech & timing**, **Speaker detection**, **Teaching analysis**, and **Ready for review**.
-- Show measured-word coverage, low-confidence words, speaker count, language, duration agreement, provider, and version.
-- Keep drag timing controls, speaker relabelling, split/merge, undo/redo, preview, and approval.
-- Add low-confidence filtering and tap-to-replay for a selected word or sentence.
-- Add an explicit **Regenerate timing** action with cost confirmation. Refreshing, previewing, publishing, and student playback never call Scribe.
-
-## Student mobile experience
-Build on the current teleprompter and clock engine rather than rewriting them.
-
-- Keep the video and current words visible together on common phone heights.
-- Use a cinematic focus area for the current sentence, with previous and next lines softened for context.
-- Give every word a stable footprint so highlights never move the text.
-- Use a restrained luminous active-word treatment, a completed-word state, and quiet upcoming words.
-- Show a compact active-speaker marker with accessible, consistent speaker colours.
-- Make words tappable to seek and replay from their measured boundary.
-- Keep sentence replay, five-second rewind, speed, translation reveal, text size, line spacing, auto-follow, and audio controls thumb-reachable.
-- Show **Audio-synced** only for approved measured timing; fallback lessons show **Estimated timing**.
-- Preserve grammar, vocabulary, notes, purchases, bookmarks, progress, and other lesson views.
-- Support safe areas, portrait/landscape, rotation, screen resume, slow connections, long transcripts, and reduced motion.
-
-## Cost controls
-- Save an audio fingerprint plus alignment settings and reuse a successful result when both match.
-- Keep the current atomic per-lesson claim so simultaneous admin actions cannot create duplicate calls.
-- Record one provider-call ledger entry per processing attempt with duration, status, model, and administrator—never credentials.
-- Add configurable upload-size and duration limits.
-- Enforce an import-boundary test proving student endpoints cannot reach ElevenLabs.
+## Technical safeguards
+- Environment: `ELEVENLABS_API_KEY`, `ELEVENLABS_SCRIBE_MODEL=scribe_v2`, `VIDEO_ALIGNMENT_PROVIDER=elevenlabs`, existing `GEMINI_API_KEY`.
+- Add duration/file-size guards, request timeout handling, idempotency keys, media fingerprints, and exactly-once processing tests.
+- Preserve chronology validation, approved-version protection, and student-serving gates.
+- Keep old Gemini-timed lessons readable without forced migration; reprocess only when an admin chooses.
 
 ## Verification
-- Provider tests: punctuation, multiple speakers, silence, overlapping speech, Khmer/English, malformed times, low confidence, and empty audio.
-- Pipeline tests: exactly one Scribe call per explicit run and zero calls from student playback.
-- Safety tests: candidate approval/rejection, manual corrections, legacy documents, and honest fallback labels.
-- Player tests: play, pause, seek, replay, speed changes, background/resume, word tap, speaker transitions, and long transcripts.
-- Real-video validation on representative iPhone and Android sizes before rollout.
+- Provider fixtures for English, Khmer, punctuation, malformed spans, speaker changes, silence, and low-confidence speech.
+- Pipeline tests proving one provider call per admin run and candidate protection for approved content.
+- Static and runtime tests proving student routes make zero AI calls.
+- Frontend tests for measured/estimated modes, speaker transitions, seeking, speed changes, mobile focus behavior, reduced motion, and accessibility.
+- Final live acceptance test on one real classroom video before broad rollout.
 
-## Rollout
-1. Add ElevenLabs behind a server setting; leave playback unchanged.
-2. Validate a private sample set against current Gemini timing.
-3. Enable Scribe for newly processed lessons.
-4. Release Author Studio quality controls.
-5. Release the refined student karaoke presentation after real-phone testing.
-6. Reprocess older lessons individually only when an administrator chooses; never run a surprise batch migration.
-
-## Expected result
-Administrators upload once, receive measured speaker-aware timing plus Gemini teaching content, review it, and publish it. Students receive an elegant word-synchronized lesson that can be replayed by any class size without recurring AI cost.
+## Delivery sequence
+1. Backend provider activation and schema-safe persistence.
+2. Admin pipeline labels, quality controls, and candidate review.
+3. Mobile karaoke visual refinement.
+4. Automated regression and no-playback-cost verification.
+5. Staged rollout behind the provider flag, then production enablement after one approved real-video test.
