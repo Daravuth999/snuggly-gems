@@ -1,5 +1,5 @@
 /**
- * PipelinePanel.jsx — the Gemini AI Processing dashboard: the flagship
+ * PipelinePanel.jsx — the lesson processing dashboard: the flagship
  * visual pipeline. The backend runs six real steps (video_pipeline_tools
  * .py's PIPELINE_STEPS); this dashboard presents them as the full
  * educational production storyline with per-substep status, a live
@@ -20,11 +20,11 @@ const GOLD = "#D4A843";
 const DISPLAY_STEPS = [
   { label: "Media validation", backend: "media_check" },
   { label: "Audio extraction", backend: "audio_extraction" },
-  { label: "Gemini speech recognition", backend: "speech_recognition" },
-  { label: "Speaker detection", backend: "speech_recognition" },
-  { label: "Sentence segmentation", backend: "synchronization" },
-  { label: "Synchronization generation", backend: "synchronization" },
-  { label: "Educational analysis", backend: "educational_analysis" },
+  { label: "ElevenLabs speech & word timing", backend: "speech_recognition" },
+  { label: "Speaker diarization", backend: "speech_recognition" },
+  { label: "Canonical synchronization", backend: "synchronization" },
+  { label: "Timing quality check", backend: "synchronization" },
+  { label: "Gemini teaching analysis", backend: "educational_analysis" },
   { label: "Vocabulary extraction", backend: "educational_analysis" },
   { label: "Grammar notes", backend: "educational_analysis" },
   { label: "CEFR classification", backend: "educational_analysis" },
@@ -118,7 +118,7 @@ export default function PipelinePanel({ lesson, onChanged }) {
     return (
       <div className="rounded-xl border border-dashed border-white/10 p-8 text-center text-[12px] text-faded"
            data-testid="pipeline-no-media">
-        Upload this lesson's media first — Gemini processing starts automatically the moment the upload lands.
+        Upload this lesson's media first — precision processing starts automatically when the upload completes.
       </div>
     );
   }
@@ -127,7 +127,7 @@ export default function PipelinePanel({ lesson, onChanged }) {
     <div className="space-y-4" data-testid="production-pipeline-panel">
       <div className="flex items-center gap-2 flex-wrap">
         <Wand2 size={14} className="text-amber-300" />
-        <span className="text-[13px] font-semibold text-parchment">Gemini processing</span>
+        <span className="text-[13px] font-semibold text-parchment">Lesson processing</span>
         <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border"
               data-testid="pipeline-state-badge"
               style={complete ? { color: "#6ee7b7", borderColor: "rgba(52,211,153,0.4)", background: "rgba(52,211,153,0.1)" }
@@ -147,7 +147,7 @@ export default function PipelinePanel({ lesson, onChanged }) {
             <button onClick={handleRun} disabled={busy}
                     data-testid="pipeline-run-button"
                     className="inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-lg border border-amber-400/40 text-amber-300 disabled:opacity-40">
-              <RefreshCw size={11} /> {failed ? "Retry processing" : complete ? "Re-process" : "Process with Gemini"}
+              <RefreshCw size={11} /> {failed ? "Retry processing" : complete ? "Regenerate timing" : "Process lesson"}
             </button>
           )}
         </div>

@@ -1,6 +1,14 @@
-"""video_word_alignment.py — real, MEASURED per-word timing for the Video
-Library's original-upload transcript, merged onto Gemini's existing
-sentence/speaker structure.
+"""One-time, authoring-only word timing selection for Video Library.
+
+ElevenLabs Scribe v2 is the default speech/timing authority for new runs.
+It returns spoken text, measured word boundaries, speaker identities,
+language, and recognition confidence in one call. Gemini remains separate
+and receives the persisted Scribe transcript only for educational analysis.
+
+The older Gemini word-timestamp implementation and generic merge helpers
+remain below solely as a controlled rollback path. Set
+VIDEO_ALIGNMENT_PROVIDER=gemini to select it; the default is elevenlabs.
+Student playback never imports or calls this module.
 
 2026-09 REDESIGN — GEMINI ONLY (immediately follows the previous commit's
 ElevenLabs removal). Verified directly against Gemini's own official
@@ -100,6 +108,7 @@ import re
 import httpx
 
 from sync_schema import build_confidence
+from sync_provider import ScribeAlignmentProvider
 from video_ai_provider import VideoAiError, ai_available, upload_media_to_files_api
 
 logger = logging.getLogger("eduhub.video_word_alignment")
@@ -115,12 +124,13 @@ _TRANSCRIBE_TIMEOUT = httpx.Timeout(300.0, connect=15.0)
 # "every pipeline stage gets its own override, never shares configuration"
 # convention established there, so changing this can never silently affect
 # either of those other Gemini call sites, or vice versa.
-DEFAULT_WORD_TIMESTAMP_MODEL = "gemini-3.5-transcribe"
+DEFAULT_WORD_TIMESTAMP_MODEL = "scribe_v2"
+DEFAULT_GEMINI_WORD_TIMESTAMP_MODEL = "gemini-3.5-transcribe"
 
 # Gemini's own documented limit for word-level timestamps (30 minutes,
 # vs 1 hour without them) — checked before attempting a call, not learned
 # from a rejected request.
-MAX_ALIGNMENT_AUDIO_SECONDS = 30 * 60
+MAX_ALIGNMENT_AUDIO_SECONDS = int(os.environ.get("VIDEO_ALIGNMENT_MAX_SECONDS", "1800"))
 
 # Chronological-order guard for merge_real_word_timing (2026-09 production
 # incident, see that function's own docstring). Matches sync_schema.
@@ -134,25 +144,22 @@ def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _word_timestamp_model() -> str:
-    return (os.environ.get("VIDEO_ALIGNMENT_MODEL") or "").strip() or DEFAULT_WORD_TIMESTAMP_MODEL
+def _scribe_model() -> str:
+    return (os.environ.get("ELEVENLABS_SCRIBE_MODEL") or "").strip() or DEFAULT_WORD_TIMESTAMP_MODEL
 
 
 def get_word_alignment_provider():
-    """Returns a real GeminiWordTimestampProvider if GEMINI_API_KEY is
-    configured and mock mode isn't forced (video_ai_provider.ai_available()
-    — the SAME credential/availability check every other Gemini call in this
-    codebase uses, per the explicit "reuse the existing Gemini client/
-    credential setup" instruction), else None. A missing key or forced mock
-    mode is a valid, non-error resilience outcome (word alignment is skipped
-    for this run, honestly marked as such — never retried or treated as a
-    failure)."""
-    if not ai_available():
+    """Return the configured one-time authoring provider."""
+    selected = (os.environ.get("VIDEO_ALIGNMENT_PROVIDER") or "elevenlabs").strip().lower()
+    if selected == "gemini":
+        if not ai_available():
+            return None
+        key = os.environ.get("GEMINI_API_KEY", "").strip()
+        return GeminiWordTimestampProvider(api_key=key, model=DEFAULT_GEMINI_WORD_TIMESTAMP_MODEL) if key else None
+    if selected != "elevenlabs":
         return None
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        return None
-    return GeminiWordTimestampProvider(api_key=api_key)
+    key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+    return ScribeAlignmentProvider(key, model_id=_scribe_model()) if key else None
 
 
 def _normalize_token(word: str) -> str:
@@ -197,7 +204,7 @@ class GeminiWordTimestampProvider:
         if not api_key:
             raise ValueError("GeminiWordTimestampProvider requires an api_key")
         self._api_key = api_key
-        self._model = model or _word_timestamp_model()
+        self._model = model or DEFAULT_GEMINI_WORD_TIMESTAMP_MODEL
         self._http_client = http_client  # injectable for tests
 
     @property
