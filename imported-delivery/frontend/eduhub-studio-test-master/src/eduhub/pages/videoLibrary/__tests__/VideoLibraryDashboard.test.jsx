@@ -123,7 +123,7 @@ test("renders the premium discovery prompt and real progress in the adaptive pat
   render(<VideoLibraryDashboard />);
 
   expect(await screen.findByText("What will you unlock today?")).toBeInTheDocument();
-  expect(screen.getByTestId("video-library-spotlight")).toHaveTextContent("40% complete");
+  expect(await screen.findByTestId("video-library-spotlight")).toHaveTextContent("40% complete");
   expect(screen.getByTestId("video-library-adaptive-path")).toHaveTextContent("40%");
   expect(screen.getByTestId("video-library-adaptive-path")).toHaveTextContent("Ordering Coffee");
 });
