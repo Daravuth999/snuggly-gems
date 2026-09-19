@@ -22,7 +22,7 @@ function speakerName(speaker: string | null) {
 
 export function KaraokePrompter({ videoUrl, words }: KaraokePrompterProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const activeRef = useRef<HTMLSpanElement>(null);
+  const activeRef = useRef<HTMLButtonElement>(null);
   const [currentMs, setCurrentMs] = useState(0);
   const [playing, setPlaying] = useState(false);
 
