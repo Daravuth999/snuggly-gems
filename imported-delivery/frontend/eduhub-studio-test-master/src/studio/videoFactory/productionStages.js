@@ -49,7 +49,7 @@ export function stageStatus(lesson, sync, narrationJob) {
   // past "media" the instant upload finished — ProductionStudio's
   // auto-advance-to-live-stage effect then yanked the admin off
   // MediaPanel's still-unresolved choice UI and onto the unrelated AI
-  // Processing tab (PipelinePanel's own "Process with Gemini" button,
+  // Processing tab (PipelinePanel's own "Process lesson" button,
   // which has no transcript-import option at all) before the choice
   // could ever be seen or used. `pipelineStarted` requires a REAL
   // scheduled run — any status at all — which only exists once the admin

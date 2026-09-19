@@ -281,7 +281,7 @@ export const SentenceRow = memo(function SentenceRow({ pIdx, sIdx, globalIdx, se
                     title={
                       lowConf ? `Low confidence (${Math.round(conf * 100)}%)`
                         : interpolated ? "Estimated timing — not independently measured"
-                        : measured ? "Real measured timing (gemini-3.5-transcribe)"
+                        : measured ? "Measured from the uploaded audio"
                         : undefined
                     }
                     style={selectedWord === i

@@ -336,6 +336,8 @@ function Teleprompter({
   // that already had it before this feature existed. Only an EXPLICIT
   // non-"complete" value degrades.
   const documentAligned = sync?.alignmentStatus == null || sync.alignmentStatus === "complete";
+  const measuredTiming = sync?.wordAlignment?.status === "complete"
+    && (sync?.wordAlignment?.matchedWords || 0) > 0;
   const speakers = useMemo(() => sync?.speakers || [], [sync]);
   const speakerLabel = useMemo(() => {
     const out = {};
@@ -442,7 +444,11 @@ function Teleprompter({
 
   if (resolvedMode === "conversation") {
     return (
-      <div className={`relative flex flex-col min-h-0 ${className}`}>
+      <div className={`tp-stage relative flex flex-col min-h-0 ${className}`}>
+        <div className="tp-sync-status" aria-label={measuredTiming ? "Audio-synced word timing" : "Estimated word timing"}>
+          <span className={`tp-sync-dot${measuredTiming ? " tp-sync-dot-live" : ""}`} aria-hidden="true" />
+          {measuredTiming ? "Audio-synced" : "Estimated timing"}
+        </div>
         <div ref={containerRef} className="tp-viewport flex-1 min-h-0 overflow-y-auto px-4 py-5 space-y-3"
              data-testid="teleprompter-conversation"
              style={{ fontFamily }}>
@@ -470,7 +476,11 @@ function Teleprompter({
   // Storytelling: flowing paragraphs, generous line-height for reading along.
   let flatIdx = -1;
   return (
-    <div className={`relative flex flex-col min-h-0 ${className}`}>
+    <div className={`tp-stage relative flex flex-col min-h-0 ${className}`}>
+      <div className="tp-sync-status" aria-label={measuredTiming ? "Audio-synced word timing" : "Estimated word timing"}>
+        <span className={`tp-sync-dot${measuredTiming ? " tp-sync-dot-live" : ""}`} aria-hidden="true" />
+        {measuredTiming ? "Audio-synced" : "Estimated timing"}
+      </div>
       <div ref={containerRef}
            className="tp-viewport flex-1 min-h-0 overflow-y-auto px-5 py-6 space-y-5"
            data-testid="teleprompter-storytelling"

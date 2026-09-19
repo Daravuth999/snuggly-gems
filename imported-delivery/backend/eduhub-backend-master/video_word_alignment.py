@@ -10,8 +10,7 @@ remain below solely as a controlled rollback path. Set
 VIDEO_ALIGNMENT_PROVIDER=gemini to select it; the default is elevenlabs.
 Student playback never imports or calls this module.
 
-2026-09 REDESIGN — GEMINI ONLY (immediately follows the previous commit's
-ElevenLabs removal). Verified directly against Gemini's own official
+Legacy rollback implementation — verified directly against Gemini's official
 documentation (ai.google.dev/gemini-api/docs/transcribe,
 .../models/gemini-3.5-transcribe, ai.google.dev/api/interactions-api —
 fetched live 2026-09, not assumed) before writing a line of this module,
@@ -447,9 +446,11 @@ async def run_word_alignment(media_bytes: bytes, transcript_text: str, gemini_sy
     need this since it accepted a raw multipart file with no mime
     negotiation."""
     if provider is None:
+        selected = (os.environ.get("VIDEO_ALIGNMENT_PROVIDER") or "elevenlabs").strip().lower()
+        missing_key = "GEMINI_API_KEY" if selected == "gemini" else "ELEVENLABS_API_KEY"
         return gemini_sync, {
             "status": "skipped", "provider": None,
-            "reason": "GEMINI_API_KEY not configured (or mock mode forced) — real alignment unavailable this run",
+            "reason": f"{missing_key} not configured — measured alignment unavailable this run",
             "attemptedAt": _now_iso(),
         }
 
@@ -459,16 +460,16 @@ async def run_word_alignment(media_bytes: bytes, transcript_text: str, gemini_sy
             "status": "skipped",
             "provider": getattr(provider, "provider_version", None),
             "reason": (
-                f"audio duration {duration:.0f}s exceeds gemini-3.5-transcribe's documented "
-                f"{MAX_ALIGNMENT_AUDIO_SECONDS // 60}-minute limit for word-level timestamps"
+                f"audio duration {duration:.0f}s exceeds the configured "
+                f"{MAX_ALIGNMENT_AUDIO_SECONDS // 60}-minute alignment limit"
             ),
             "attemptedAt": _now_iso(),
         }
 
     try:
-        result = await provider.align(media_bytes, content_type)
+        result = await provider.align(media_bytes, content_type=content_type)
     except Exception as exc:  # noqa: BLE001 — a provider outage must never fail the lesson
-        logger.warning("video_word_alignment: Gemini word-timestamp alignment failed, using interpolated timing: %s", exc)
+        logger.warning("video_word_alignment: word-timestamp alignment failed, using interpolated timing: %s", exc)
         return gemini_sync, {
             "status": "failed",
             "provider": getattr(provider, "provider_version", None),

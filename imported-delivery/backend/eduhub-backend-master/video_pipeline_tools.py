@@ -2,8 +2,8 @@
 
 Orchestrates the post-upload flow the product spec defines:
 
-    Upload → Media Ready → Speech Recognition (Gemini, see
-    video_ai_provider.py) → Synchronization Generation (canonical
+    Upload → Media Ready → Speech Recognition + measured timing (ElevenLabs
+    Scribe v2) → Synchronization Generation (canonical
     sync_schema.py document, applied via sync_studio_tools.apply_alignment_
     result — chapter_sync stays exclusively owned by sync_studio_tools) →
     Gemini Educational Analysis → Review Ready (Synchronization Review
@@ -348,6 +348,8 @@ async def run_pipeline(db, lesson_id: str, media_bucket, *, imported_transcript:
     if not lesson.get("mediaRef") or not lesson.get("syncId"):
         raise RuntimeError("lesson has no uploaded media yet")
 
+    # Keep Gemini as the educational-analysis engine. Speech/timing uses
+    # the separately configured authoring-only provider below.
     provider = video_ai_provider.get_video_ai_provider()
 
     # A fresh runId identifies exactly this attempt — every _set_step/
@@ -461,7 +463,9 @@ async def run_pipeline(db, lesson_id: str, media_bucket, *, imported_transcript:
         else:
             await _set_step(db, lesson_id, run_id, "audio_extraction", "complete", "media is already audio-only")
 
-        # 3 — speech recognition (Gemini / mock, provider-neutral surface),
+        # 3 — speech recognition and measured word timing. ElevenLabs
+        # Scribe is the default and is called exactly once here. The saved
+        # sync document is then the sole source used by student playback.
         # OR manual transcript import (additive — see transcript_import.py
         # and this function's own docstring). Skipped entirely for a
         # confirmed-silent video — never "running" then "failed" — since
@@ -514,41 +518,44 @@ async def run_pipeline(db, lesson_id: str, media_bucket, *, imported_transcript:
         elif has_audio:
             await _set_step(db, lesson_id, run_id, "speech_recognition", "running")
             await sync_studio_tools.mark_alignment_processing(db, sync_id)
-            result = await provider.align(transcribe_bytes, transcribe_ct)
-            transcript_text = result.get("transcriptText", "")
-
-            # 2026-09 real per-word alignment (Teleprompter karaoke
-            # structural fix, §1): Gemini's own ASR prompt only ever asks
-            # for SENTENCE-level start/end (confirmed by reading _ASR_
-            # PROMPT directly) — video_ai_provider.distribute_words then
-            # spreads word timing evenly across each sentence's span by
-            # character length, an honest ESTIMATE, never a measurement
-            # (confidence.alignment is already None for every word this
-            # produces). This runs a second, independent transcription of
-            # the SAME already-extracted audio through Gemini's own
-            # gemini-3.5-transcribe model (real per-word measured
-            # timestamps — no per-word confidence is published by this
-            # provider, see video_word_alignment.py's module docstring) and
-            # merges its timing onto Gemini's existing sentence/speaker
-            # structure wherever the two transcriptions agree on a word —
-            # see video_word_alignment.py's module docstring for exactly
-            # why this (not literal reference-conditioned forced
-            # alignment, which no available provider actually offers) is
-            # the honest, evidence-based design. NEVER raises: a missing
-            # API key or a Gemini word-timestamp outage leaves Gemini's own
-            # interpolated timing in place, exactly as before this feature
-            # existed — this is additive, not a replacement dependency.
-            # `transcribe_ct` (the same real mime type already used for the
-            # segmentation call above) is passed through so the Gemini
-            # Files API upload inside video_word_alignment.py transcodes
-            # correctly — see run_word_alignment's own docstring.
             alignment_provider = video_word_alignment.get_word_alignment_provider()
-            aligned_sync, word_alignment_meta = await video_word_alignment.run_word_alignment(
-                transcribe_bytes, transcript_text, result.get("sync") or {}, transcribe_ct,
-                provider=alignment_provider,
-            )
-            result["sync"] = aligned_sync
-            result["sync"]["wordAlignment"] = word_alignment_meta
+            if alignment_provider is not None and alignment_provider.provider_version.startswith("elevenlabs-scribe"):
+                result = await alignment_provider.align(transcribe_bytes, content_type=transcribe_ct)
+                transcript_text = result.get("transcriptText", "")
+                measured_words = [
+                    word
+                    for paragraph in (result.get("sync") or {}).get("paragraphs") or []
+                    for sentence in paragraph.get("sentences") or []
+                    for word in sentence.get("words") or []
+                ]
+                word_alignment_meta = {
+                    "status": "complete",
+                    "provider": alignment_provider.provider_version,
+                    "totalWords": len(measured_words),
+                    "matchedWords": len(measured_words),
+                    "matchRatio": 1.0 if measured_words else 0.0,
+                    "meanAlignmentConfidence": None,
+                    "lowConfidenceWordCount": sum(
+                        1 for word in measured_words
+                        if isinstance((word.get("confidence") or {}).get("transcript"), (int, float))
+                        and word["confidence"]["transcript"] < 0.7
+                    ),
+                    "languageCode": result.get("languageCode"),
+                    "languageProbability": result.get("languageProbability"),
+                    "attemptedAt": _now(),
+                }
+                result["sync"]["wordAlignment"] = word_alignment_meta
+            else:
+                # Explicit rollback path: retain the established Gemini
+                # sentence structure and merge measured words onto it.
+                result = await provider.align(transcribe_bytes, transcribe_ct)
+                transcript_text = result.get("transcriptText", "")
+                aligned_sync, word_alignment_meta = await video_word_alignment.run_word_alignment(
+                    transcribe_bytes, transcript_text, result.get("sync") or {}, transcribe_ct,
+                    provider=alignment_provider,
+                )
+                result["sync"] = aligned_sync
+                result["sync"]["wordAlignment"] = word_alignment_meta
 
             # 2026-09 speaker-continuity quality signal (§2d/4c) — never
             # blocks or fails the step; a non-fatal note only, same

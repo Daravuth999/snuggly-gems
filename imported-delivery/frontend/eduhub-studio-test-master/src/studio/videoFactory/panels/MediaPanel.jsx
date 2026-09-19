@@ -242,7 +242,7 @@ export default function MediaPanel({ lesson, onChanged, onPipelineStarted }) {
             </>
           )}
           {upload.state === "scheduling" && (
-            <div className="text-[11px] text-faded">Starting Gemini processing…</div>
+            <div className="text-[11px] text-faded">Starting precision speech processing…</div>
           )}
           {upload.state === "importing" && (
             <div className="text-[11px] text-faded">Parsing and applying your transcript…</div>

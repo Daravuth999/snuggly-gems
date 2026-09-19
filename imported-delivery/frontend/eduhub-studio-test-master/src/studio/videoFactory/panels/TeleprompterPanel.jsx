@@ -207,7 +207,7 @@ export default function TeleprompterPanel({ lesson, onChanged }) {
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center text-[12px] text-faded p-8 text-center">
-            Upload media and run Gemini processing first — the live preview uses the real synchronized transcript.
+            Upload media and process the lesson first — the live preview uses its saved synchronized transcript.
           </div>
         )}
       </div>
