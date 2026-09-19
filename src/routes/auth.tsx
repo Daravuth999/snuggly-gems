@@ -1,6 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { Banner, Button, Card, Field, Screen, Wave } from "@/components/app-ui";
 
 export const Route = createFileRoute("/auth")({
   head: () => ({
@@ -70,30 +71,37 @@ function AuthPage() {
   }
 
   return (
-    <main className="min-h-dvh bg-slate-950 text-slate-100 flex items-center justify-center px-5 py-10">
-      <div className="w-full max-w-sm">
-        <h1 className="text-2xl font-semibold">{mode === "forgot" ? "Reset your password" : "Voice-Over Studio"}</h1>
-        <p className="mt-1 text-sm text-slate-400">
-          {mode === "forgot" ? "We’ll email a secure link to your admin account." : "Private tool — admin team only."}
-        </p>
+    <Screen>
+      <div className="mx-auto flex min-h-dvh w-full max-w-sm flex-col justify-center px-6 py-14">
+        <div className="rise mb-8 text-center">
+          <div className="mx-auto mb-5 grid h-16 w-16 place-items-center rounded-[22px] bg-[linear-gradient(140deg,oklch(0.42_0.2_290),oklch(0.5_0.16_240))] shadow-[0_24px_50px_-24px_oklch(0.62_0.19_295)]">
+            <Wave />
+          </div>
+          <h1 className="text-[26px] font-bold tracking-tight">
+            {mode === "forgot" ? "Reset password" : "Voice-Over Studio"}
+          </h1>
+          <p className="mt-1.5 text-[13px] text-ink-400">
+            {mode === "forgot"
+              ? "We’ll email a secure link to your admin account."
+              : "Private tool — admin team only."}
+          </p>
+        </div>
 
-        <form onSubmit={submit} className="mt-8 space-y-4">
-          <div>
-            <label className="text-sm text-slate-300" htmlFor="email">Email</label>
-            <input
+        <Card>
+          <form onSubmit={submit} className="space-y-4">
+            <Field
+              label="Email"
               id="email"
               type="email"
               required
               autoComplete="email"
+              inputMode="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="mt-1 w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-3 text-base outline-none focus:border-emerald-500"
             />
-          </div>
-          {mode !== "forgot" && (
-            <div>
-              <label className="text-sm text-slate-300" htmlFor="password">Password</label>
-              <input
+            {mode !== "forgot" && (
+              <Field
+                label="Password"
                 id="password"
                 type="password"
                 required
@@ -101,37 +109,35 @@ function AuthPage() {
                 autoComplete={mode === "up" ? "new-password" : "current-password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="mt-1 w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-3 text-base outline-none focus:border-emerald-500"
               />
-            </div>
-          )}
+            )}
 
-          {error && <p className="text-sm text-rose-400">{error}</p>}
-          {notice && <p className="text-sm text-emerald-400">{notice}</p>}
+            {error && <Banner tone="bad">{error}</Banner>}
+            {notice && <Banner tone="ok">{notice}</Banner>}
 
-          <button
-            type="submit"
-            disabled={busy}
-            className="w-full rounded-lg bg-emerald-500 px-4 py-3 font-medium text-slate-950 disabled:opacity-50"
-          >
-            {busy ? "Please wait…" : mode === "in" ? "Sign in" : mode === "up" ? "Create admin account" : "Send reset link"}
-          </button>
-        </form>
+            <Button type="submit" disabled={busy} className="mt-1">
+              {busy ? "Please wait…" : mode === "in" ? "Sign in" : mode === "up" ? "Create admin account" : "Send reset link"}
+            </Button>
+          </form>
+        </Card>
 
-        <div className="mt-5 flex flex-col items-start gap-3 text-sm">
+        <div className="mt-6 flex flex-col items-center gap-3 text-[13px]">
           {mode === "in" && (
-            <button onClick={() => { setMode("forgot"); setError(null); setNotice(null); }} className="text-slate-300 underline">
+            <button
+              onClick={() => { setMode("forgot"); setError(null); setNotice(null); }}
+              className="press text-ink-300"
+            >
               Forgot password?
             </button>
           )}
           <button
             onClick={() => { setMode(mode === "in" ? "up" : "in"); setError(null); setNotice(null); }}
-            className="text-slate-400 underline"
+            className="press text-ink-400"
           >
             {mode === "in" ? "First time? Create the admin account" : "Back to sign in"}
           </button>
         </div>
       </div>
-    </main>
+    </Screen>
   );
 }

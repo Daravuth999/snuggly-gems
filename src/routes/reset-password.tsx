@@ -1,6 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { Banner, Button, Card, Field, Screen, Spinner, Wave } from "@/components/app-ui";
 
 export const Route = createFileRoute("/reset-password")({
   head: () => ({
@@ -68,35 +69,58 @@ function ResetPasswordPage() {
   }
 
   return (
-    <main className="min-h-dvh bg-slate-950 text-slate-100 flex items-center justify-center px-5 py-10">
-      <div className="w-full max-w-sm">
-        <h1 className="text-2xl font-semibold">Choose a new password</h1>
-        <p className="mt-1 text-sm text-slate-400">Use at least 8 characters for your admin account.</p>
-
-        {checking ? (
-          <p className="mt-8 text-sm text-slate-400">Checking your secure link…</p>
-        ) : recoveryReady ? (
-          <form onSubmit={submit} className="mt-8 space-y-4">
-            <div>
-              <label className="text-sm text-slate-300" htmlFor="new-password">New password</label>
-              <input id="new-password" type="password" required minLength={8} autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} className="mt-1 w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-3 text-base outline-none focus:border-emerald-500" />
-            </div>
-            <div>
-              <label className="text-sm text-slate-300" htmlFor="confirm-password">Confirm new password</label>
-              <input id="confirm-password" type="password" required minLength={8} autoComplete="new-password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="mt-1 w-full rounded-lg bg-slate-900 border border-slate-700 px-3 py-3 text-base outline-none focus:border-emerald-500" />
-            </div>
-            {error && <p className="text-sm text-rose-400">{error}</p>}
-            <button type="submit" disabled={busy} className="w-full rounded-lg bg-emerald-500 px-4 py-3 font-medium text-slate-950 disabled:opacity-50">
-              {busy ? "Saving…" : "Save new password"}
-            </button>
-          </form>
-        ) : (
-          <div className="mt-8">
-            <p className="text-sm text-rose-400">This reset link is invalid or has expired. Request a new one from the sign-in page.</p>
-            <button onClick={() => navigate({ to: "/auth", replace: true })} className="mt-5 text-sm text-slate-300 underline">Return to sign in</button>
+    <Screen>
+      <div className="mx-auto flex min-h-dvh w-full max-w-sm flex-col justify-center px-6 py-14">
+        <div className="rise mb-8 text-center">
+          <div className="mx-auto mb-5 grid h-16 w-16 place-items-center rounded-[22px] bg-[linear-gradient(140deg,oklch(0.42_0.2_290),oklch(0.5_0.16_240))]">
+            <Wave />
           </div>
-        )}
+          <h1 className="text-[26px] font-bold tracking-tight">Choose a new password</h1>
+          <p className="mt-1.5 text-[13px] text-ink-400">At least 8 characters for your admin account.</p>
+        </div>
+
+        <Card>
+          {checking ? (
+            <Spinner label="Checking your secure link…" />
+          ) : recoveryReady ? (
+            <form onSubmit={submit} className="space-y-4">
+              <Field
+                label="New password"
+                id="new-password"
+                type="password"
+                required
+                minLength={8}
+                autoComplete="new-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+              <Field
+                label="Confirm new password"
+                id="confirm-password"
+                type="password"
+                required
+                minLength={8}
+                autoComplete="new-password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+              />
+              {error && <Banner tone="bad">{error}</Banner>}
+              <Button type="submit" disabled={busy}>
+                {busy ? "Saving…" : "Save new password"}
+              </Button>
+            </form>
+          ) : (
+            <div className="space-y-4">
+              <Banner tone="bad">
+                This reset link is invalid or has expired. Request a new one from the sign-in page.
+              </Banner>
+              <Button variant="outline" onClick={() => navigate({ to: "/auth", replace: true })}>
+                Return to sign in
+              </Button>
+            </div>
+          )}
+        </Card>
       </div>
-    </main>
+    </Screen>
   );
 }
