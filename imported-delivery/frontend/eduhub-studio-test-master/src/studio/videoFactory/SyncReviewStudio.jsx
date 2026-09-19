@@ -93,17 +93,17 @@ function WordTimingDragBar({ sentence, word, onCommit }) {
 
   return (
     <div ref={trackRef} data-testid="word-timing-drag-track"
-         className="relative h-4 w-full rounded bg-black/40 my-1" style={{ touchAction: "none" }}>
+         className="relative h-8 w-full rounded-lg bg-black/40 my-2" style={{ touchAction: "none" }}>
       <div className="absolute top-0 bottom-0 rounded bg-amber-400/25 pointer-events-none"
            style={{ left: pctFor(live.start), width: `max(2px, calc(${pctFor(live.end)} - ${pctFor(live.start)}))` }} />
       <div onPointerDown={startDrag("start")} data-testid="word-timing-handle-start"
            role="slider" aria-label="Word start time" tabIndex={0}
-           className="absolute -top-0.5 -bottom-0.5 w-2.5 rounded cursor-ew-resize bg-amber-300 hover:bg-amber-200"
-           style={{ left: `calc(${pctFor(live.start)} - 5px)` }} />
+            className="absolute -top-1 -bottom-1 w-5 rounded-md cursor-ew-resize bg-amber-300 hover:bg-amber-200 shadow-lg"
+            style={{ left: `calc(${pctFor(live.start)} - 10px)` }} />
       <div onPointerDown={startDrag("end")} data-testid="word-timing-handle-end"
            role="slider" aria-label="Word end time" tabIndex={0}
-           className="absolute -top-0.5 -bottom-0.5 w-2.5 rounded cursor-ew-resize bg-amber-300 hover:bg-amber-200"
-           style={{ left: `calc(${pctFor(live.end)} - 5px)` }} />
+            className="absolute -top-1 -bottom-1 w-5 rounded-md cursor-ew-resize bg-amber-300 hover:bg-amber-200 shadow-lg"
+            style={{ left: `calc(${pctFor(live.end)} - 10px)` }} />
     </div>
   );
 }
@@ -586,7 +586,7 @@ export default function SyncReviewStudio({ lesson, onClose, onChanged }) {
   const speakersList = useMemo(() => displayDoc?.speakers || [], [displayDoc]);
 
   return (
-    <div className="fixed inset-0 z-[200] flex flex-col" style={{ background: "#0F0A16" }}
+    <div className="fixed inset-0 z-[200] flex flex-col" style={{ background: "#0b0e14" }}
          data-testid="sync-review-studio">
       {/* Top bar — iOS safe-area fix via the shared studioSafeAreaTop()
           convention (safeArea.js). This is a `fixed inset-0` overlay
@@ -594,7 +594,7 @@ export default function SyncReviewStudio({ lesson, onClose, onChanged }) {
           inherit AppShell's Header.jsx safe-area padding and was
           rendering flush against the Dynamic Island / status bar on
           iPhone. */}
-      <div className="flex items-center gap-3 px-4 pb-2.5 pr-14 border-b border-white/10 flex-wrap"
+      <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-4 pb-2.5 pr-14 border-b border-white/10"
            style={{ paddingTop: studioSafeAreaTop(10) }}>
         <button onClick={onClose} data-testid="review-studio-close" aria-label="Close Review Studio"
                 className="p-1.5 rounded-lg hover:bg-white/10 text-parchment"><X size={16} /></button>
@@ -605,7 +605,7 @@ export default function SyncReviewStudio({ lesson, onClose, onChanged }) {
             <WordAlignmentBadge wordAlignment={sync?.wordAlignment} />
           </div>
         </div>
-        <div className="ml-auto flex items-center gap-2 flex-wrap">
+        <div className="ml-auto flex items-center gap-2 overflow-x-auto max-w-[58vw]">
           {sync && (
             <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border ${
               sync.reviewStatus === "approved" ? "text-emerald-300 border-emerald-400/40 bg-emerald-400/10"

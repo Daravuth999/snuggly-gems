@@ -19,7 +19,7 @@ import {
   ArrowLeft, Lock, Bookmark, BookmarkCheck, StickyNote, Loader2,
   AlignLeft, MonitorPlay, GraduationCap, Music, Play, Pause,
   Maximize, Minimize, RectangleHorizontal, ListVideo, Repeat, Search,
-  Settings2, BookMarked, X, Sparkles, AlertTriangle,
+  Settings2, BookMarked, X, Sparkles, AlertTriangle, RotateCcw, Brain, Captions,
 } from "lucide-react";
 import {
   getLesson, getSyncDocument, reportProgress, resolveMediaSrc,
@@ -432,6 +432,53 @@ function NotesPanel({ lessonId }) {
   );
 }
 
+function ScriptOverlay({ sentences, onSeek, onClose }) {
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const visible = needle
+    ? sentences.filter((sentence) => (sentence.words || []).map((word) => word.word).join(" ").toLowerCase().includes(needle))
+    : sentences;
+  return (
+    <div className="vl-script-overlay" data-testid="video-script-overlay">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 p-3 border-b border-white/10">
+        <div className="relative min-w-0">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/35" />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} autoFocus
+                 data-testid="video-transcript-search" placeholder="Find a phrase…"
+                 className="w-full rounded-lg border border-white/10 bg-white/5 py-2.5 pr-3 text-[13px] text-white placeholder:text-white/35 focus:outline-none focus:border-amber-300/50"
+                 style={{ paddingLeft: 36 }} />
+        </div>
+        <button type="button" onClick={onClose} aria-label="Close script" className="w-11 h-11 shrink-0 grid place-items-center rounded-lg border border-white/10 text-white/60"><X size={18} /></button>
+      </div>
+      <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
+        {visible.map((sentence, index) => (
+          <button key={sentence.id || index} type="button" onClick={() => { onSeek(sentence.start); onClose(); }}
+                  className="w-full text-left rounded-lg border border-white/10 bg-white/[0.025] px-3 py-3 hover:bg-white/[0.06]">
+            <span className="text-[10px] tabular-nums text-amber-300 mr-2">{fmt(sentence.start)}</span>
+            <span className="text-[13px] leading-relaxed text-white/78">{(sentence.words || []).map((word) => word.word).join(" ")}</span>
+          </button>
+        ))}
+        {visible.length === 0 && <div className="p-6 text-center text-[12px] text-white/40">No matching phrase.</div>}
+      </div>
+    </div>
+  );
+}
+
+function LearningSheet({ lesson, onClose }) {
+  return (
+    <div className="vl-learn-sheet" data-testid="video-learning-sheet" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" aria-hidden="true" />
+      <section className="vl-learn-sheet-card" onClick={(event) => event.stopPropagation()}>
+        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 mb-4">
+          <div className="min-w-0"><div className="text-[10px] font-bold uppercase text-amber-300">Explore this lesson</div><h2 className="truncate text-[17px] font-bold text-white">Meaning, vocabulary and grammar</h2></div>
+          <button type="button" onClick={onClose} aria-label="Close learning details" className="w-11 h-11 shrink-0 grid place-items-center rounded-lg border border-white/10 text-white/60"><X size={18} /></button>
+        </div>
+        <div className="space-y-5"><VocabularyPanel learning={lesson.learning} /><GrammarPanel learning={lesson.learning} /></div>
+      </section>
+    </div>
+  );
+}
+
 // v2 (2026-08) — root cause of the reported "two stacked confirmations":
 // this locked-cover screen and PurchaseLessonModal's confirm sheet both
 // showed the same title/price, one tap apart, reading as two separate
@@ -540,6 +587,8 @@ export default function VideoLessonPlayer() {
   const [saved, setSaved] = useState(false);
   const [savedBusy, setSavedBusy] = useState(false);
   const [showTpSettings, setShowTpSettings] = useState(false);
+  const [showScript, setShowScript] = useState(false);
+  const [showLearning, setShowLearning] = useState(false);
   const [tpOverrides, setTpOverrides] = useState(() => readLocalOverrides());
   // Honest playback diagnostics for the main media element — distinct from
   // `error` above (which is only the lesson-fetch API failure). Never a
@@ -854,9 +903,15 @@ export default function VideoLessonPlayer() {
   const isAudio = (lesson.contentType || "").startsWith("audio/");
   const showSidePanel = !isLocked && !theater;
   const currentChapterIdx = chapters.findIndex((c) => currentTime >= c.start && currentTime <= c.end + 0.5);
+  const currentSentence = sentences.find((sentence) => currentTime >= sentence.start && currentTime <= sentence.end) || sentences[0];
+  const replaySentence = () => {
+    if (!currentSentence) return;
+    seekTo(currentSentence.start);
+    Promise.resolve(mediaRef.current?.play?.()).catch(() => {});
+  };
 
   return (
-    <div className="h-screen bg-black text-white flex flex-col overflow-hidden" data-testid="video-lesson-player">
+    <div className="vl-player-shell h-screen text-white flex flex-col overflow-hidden" data-testid="video-lesson-player">
       {/* Top bar — this player renders OUTSIDE AppShell (its own full-bleed
           route, see this file's module docstring), so it gets none of
           Header.jsx's safe-area handling for free. On a notch/Dynamic
@@ -904,9 +959,9 @@ export default function VideoLessonPlayer() {
           space; lg: reverts to the unaffected, unchanged desktop two-column
           layout. */}
       <div ref={playerRef}
-           className={`grid grid-cols-1 gap-0 bg-black overflow-y-auto flex-1 min-h-0 ${showSidePanel ? "grid-rows-[auto_1fr] lg:grid-rows-none lg:grid-cols-[1fr_400px]" : ""}`}>
+           className={`vl-player-grid grid grid-cols-1 gap-0 overflow-y-auto flex-1 min-h-0 ${showSidePanel ? "grid-rows-[auto_1fr] lg:grid-rows-none lg:grid-cols-[minmax(0,1.45fr)_minmax(360px,.8fr)]" : ""}`}>
         {/* Stage */}
-        <div className="relative bg-black flex flex-col">
+        <div className="vl-player-stage relative flex flex-col">
           {isLocked ? (
             <PurchaseGate lesson={lesson} onPurchased={load} />
           ) : isAudio ? (
@@ -951,7 +1006,7 @@ export default function VideoLessonPlayer() {
                   the full aspect-video player unchanged), not a claim of
                   literal geometric centering. object-cover on the <video>
                   crops top/bottom instead of stretching/distorting. */}
-              <div className={`relative group/stage min-h-0 ${tab === "teleprompter" ? "aspect-[16/7] lg:aspect-video" : "aspect-video"}`}>
+              <div className="vl-player-video relative group/stage min-h-0 aspect-video max-h-[44dvh] lg:max-h-none">
                 <video ref={mediaRef} src={resolveMediaSrc(lesson.mediaRef)} playsInline
                        className="w-full h-full object-cover" onClick={togglePlay}
                        onTimeUpdate={handleTimeUpdate} onLoadedMetadata={handleLoadedMetadata}
@@ -1088,7 +1143,7 @@ export default function VideoLessonPlayer() {
 
         {/* Study side panel */}
         {showSidePanel && (
-          <div className="border-t lg:border-t-0 lg:border-l border-white/10 flex flex-col min-h-0 lg:max-h-[calc(100vh-52px)]">
+          <div className="vl-learning-dock relative border-t lg:border-t-0 lg:border-l border-white/10 flex flex-col min-h-0 lg:max-h-[calc(100vh-52px)]">
             {/* Learning Dock: the primary way a student moves between
                 Read/Teleprompter/Vocabulary/Grammar/Notes. Every tab
                 button is >=44px tall (real touch-target minimum, not just
@@ -1146,6 +1201,15 @@ export default function VideoLessonPlayer() {
               )}
             </div>
 
+            {tab === "teleprompter" && (
+              <div className="vl-practice-tools" aria-label="Speaking practice tools">
+                <button type="button" onClick={replaySentence} className="vl-practice-tool" data-testid="video-replay-sentence-button" title="Replay sentence"><RotateCcw size={15} /><span>Replay</span></button>
+                <button type="button" onClick={toggleLoop} aria-pressed={looping} className="vl-practice-tool" data-testid="video-loop-sentence-button" title="Loop sentence"><Repeat size={15} /><span>{looping ? "Looping" : "Loop"}</span></button>
+                <button type="button" onClick={() => setShowScript(true)} className="vl-practice-tool" data-testid="video-open-script-button" title="Search script"><Captions size={15} /><span>Script</span></button>
+                <button type="button" onClick={() => setShowLearning(true)} className="vl-practice-tool" data-testid="video-open-learning-button" title="Explore language"><Brain size={15} /><span>Explore</span></button>
+              </div>
+            )}
+
             <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
               {tab === "transcript" && (
                 // Unreachable — "transcript" was removed from TABS above,
@@ -1163,6 +1227,8 @@ export default function VideoLessonPlayer() {
               {tab === "grammar" && <GrammarPanel learning={lesson.learning} />}
               {tab === "notes" && <NotesPanel lessonId={lessonId} />}
             </div>
+
+            {showScript && <ScriptOverlay sentences={sentences} onSeek={seekTo} onClose={() => setShowScript(false)} />}
 
             {tab === "transcript" && (
               <div className="border-t border-white/10 p-3 space-y-2 flex-shrink-0">
@@ -1242,6 +1308,7 @@ export default function VideoLessonPlayer() {
           </div>
         </div>
       )}
+      {showLearning && <LearningSheet lesson={lesson} onClose={() => setShowLearning(false)} />}
     </div>
   );
 }
