@@ -6,8 +6,8 @@
 - [x] Verify provider isolation, candidate review safety, and zero AI playback calls.
 - [x] Package all surgical upgrade files in one clean ZIP.
 - [x] Include agent-ready purpose, installation, configuration, rollback, and verification instructions.
-- [ ] Transform the Video Library into a premium, curiosity-driven catalogue.
-- [ ] Recompose the student player as a mobile-first cinematic learning stage.
-- [ ] Rebuild karaoke presentation, search, looping, accessibility, and reading presets.
-- [ ] Upgrade the Author Studio preview and synchronization editing presentation.
-- [ ] Verify focused frontend/backend behavior and package one audited V3 ZIP.
+- [x] Transform the Video Library into a premium, curiosity-driven catalogue.
+- [x] Recompose the student player as a mobile-first cinematic learning stage.
+- [x] Rebuild karaoke presentation, search, looping, accessibility, and reading presets.
+- [x] Upgrade the Author Studio preview and synchronization editing presentation.
+- [x] Verify focused frontend/backend behavior and package one audited V3 ZIP.
