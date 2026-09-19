@@ -1006,7 +1006,7 @@ export default function VideoLessonPlayer() {
                   the full aspect-video player unchanged), not a claim of
                   literal geometric centering. object-cover on the <video>
                   crops top/bottom instead of stretching/distorting. */}
-              <div className="vl-player-video relative group/stage min-h-0 aspect-video max-h-[44dvh] lg:max-h-none">
+              <div className={`vl-player-video relative group/stage min-h-0 max-h-[44dvh] lg:max-h-none ${tab === "teleprompter" ? "aspect-[16/7] lg:aspect-video" : "aspect-video"}`}>
                 <video ref={mediaRef} src={resolveMediaSrc(lesson.mediaRef)} playsInline
                        className="w-full h-full object-cover" onClick={togglePlay}
                        onTimeUpdate={handleTimeUpdate} onLoadedMetadata={handleLoadedMetadata}

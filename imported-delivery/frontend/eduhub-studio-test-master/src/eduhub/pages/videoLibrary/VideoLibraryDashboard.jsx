@@ -426,7 +426,7 @@ export default function VideoLibraryDashboard() {
         <div className="space-y-8">
           <Row title="Continue Learning" lessons={continueWatchingLessons} progressByLesson={progressByLesson} onOpen={openLesson} testId="video-library-row-continue" index={rowIdx++} />
           <Row title="Recommended For You" lessons={recommended} progressByLesson={progressByLesson} onOpen={openLesson} testId="video-library-row-recommended" index={rowIdx++} />
-          <Row title="Featured Lessons" lessons={featured.filter((lesson) => lesson.lessonId !== spotlightLesson?.lessonId)} progressByLesson={progressByLesson} onOpen={openLesson} testId="video-library-row-featured" index={rowIdx++} />
+          <Row title="Featured Lessons" lessons={featured} progressByLesson={progressByLesson} onOpen={openLesson} testId="video-library-row-featured" index={rowIdx++} />
           <Row title="Recently Watched" lessons={recentlyWatchedLessons} progressByLesson={progressByLesson} onOpen={openLesson} testId="video-library-row-recent" index={rowIdx++} />
           <Row title="New Releases" lessons={newReleases} progressByLesson={progressByLesson} onOpen={openLesson} testId="video-library-row-new" index={rowIdx++} />
           <Row title="My Lessons" lessons={myPurchasedLessons} progressByLesson={progressByLesson} onOpen={openLesson} testId="video-library-row-my-lessons" index={rowIdx++} />

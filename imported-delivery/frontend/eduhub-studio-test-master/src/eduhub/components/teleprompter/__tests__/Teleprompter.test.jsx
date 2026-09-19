@@ -446,7 +446,7 @@ const NOT_ALIGNED_SYNC = {
 test("high-confidence real alignment renders the full crisp karaoke word highlight (storytelling mode)", () => {
   render(<Teleprompter sync={HIGH_CONF_SYNC} currentTime={0.5} mode="storytelling" config={{ karaoke: true, sentenceHighlight: true }} />);
   const word = screen.getByText(/Real/);
-  expect(word).toHaveStyle({ background: "#D4A843" }); // GOLD karaoke pill
+  expect(word).toHaveStyle({ background: "rgba(212, 168, 67, 0.16)" }); // V3 illuminated karaoke capsule
   expect(screen.getByTestId("teleprompter-sentence-0")).toHaveAttribute("data-confidence-tier", "high");
   expect(screen.getByTestId("teleprompter-sentence-0")).not.toHaveClass("tp-sentence-uncertain");
 });
