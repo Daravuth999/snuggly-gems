@@ -58,7 +58,7 @@ export default function LessonCard({ lesson, progressFraction, onOpen, featured 
     <button
       onClick={() => onOpen?.(lesson)}
       data-testid={`video-lesson-card-${lesson.lessonId}`}
-      className={`vl-card group relative flex-shrink-0 text-left overflow-hidden ${featured ? "vl-card-featured w-[82vw] max-w-[420px] sm:w-[380px]" : "w-[168px] sm:w-[196px]"}`}
+      className={`vl-card group relative flex-shrink-0 text-left overflow-hidden ${featured ? "vl-card-featured w-[82vw] max-w-[420px] sm:w-[380px]" : "w-[214px] sm:w-[232px]"}`}
     >
       <div className="relative aspect-video bg-black/40 overflow-hidden">
         {thumbnailUrl ? (
@@ -118,7 +118,7 @@ export default function LessonCard({ lesson, progressFraction, onOpen, featured 
         )}
       </div>
 
-      <div className={featured ? "p-4 space-y-1.5" : "p-3 space-y-1"}>
+      <div className={featured ? "p-4 space-y-1.5" : "vl-card-copy p-3 space-y-1"}>
         <div className={`${featured ? "text-[16px]" : "text-[12.5px]"} font-semibold leading-snug text-ink dark:text-white line-clamp-2`}>{title}</div>
         {subtitle && <div className="text-[10.5px] text-zinc-500 dark:text-white/45 line-clamp-1">{subtitle}</div>}
         <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
