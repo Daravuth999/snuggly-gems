@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Clapperboard, Sparkles, Search, X, Crown, ArrowDownWideNarrow, Play, AudioLines, ArrowRight } from "lucide-react";
+import { Clapperboard, Sparkles, Search, X, Crown, ArrowDownWideNarrow, Play, AudioLines, ArrowRight, Target, TrendingUp } from "lucide-react";
 import { listLessons, listContinueWatching, listBookmarks, listRecentlyWatched, listMyPurchases, getRestrictedPointsBalance } from "./videoLibraryApi";
 import LessonCard, { LessonCardSkeleton, CATEGORY_LABELS } from "./LessonCard";
 import { useAuth } from "../../context/AuthContext";
@@ -69,57 +69,44 @@ function WelcomeHeader({ student, continueCount }) {
     getRestrictedPointsBalance().then((bal) => { if (!cancelled) setRestrictedBalance(bal); });
     return () => { cancelled = true; };
   }, []);
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
   return (
-    <div className="px-4 sm:px-6 pt-5 pb-6 mb-2 rounded-b-2xl vl-rise"
-         style={{ background: "linear-gradient(135deg, rgba(212,168,67,0.16), rgba(0,0,0,0) 70%)" }}
-         data-testid="video-library-welcome">
-      <div className="flex items-center gap-2 mb-3">
-        <Clapperboard size={18} style={{ color: GOLD }} />
-        <span className="text-[11px] font-bold uppercase tracking-[0.14em]" style={{ color: GOLD }}>
-          Video Library
-        </span>
-      </div>
-      <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3.5">
-        <div className="w-12 h-12 rounded-full flex items-center justify-center text-[15px] font-bold flex-shrink-0"
-             data-testid="video-library-avatar"
-             style={{ background: "rgba(212,168,67,0.18)", border: "1.5px solid rgba(212,168,67,0.45)", color: GOLD }}>
-          {student?.avatar_url
-            ? <img src={student.avatar_url} alt="" className="w-full h-full rounded-full object-cover" />
-            : initials || "?"}
+    <header className="vl-discovery-header vl-rise" data-testid="video-library-welcome">
+      <div className="vl-brand-row">
+        <div className="vl-brand-lockup">
+          <span className="vl-brand-mark" aria-hidden="true"><Play size={20} fill="currentColor" /></span>
+          <span>
+            <strong>Video Library</strong>
+            <small>Your speaking practice</small>
+          </span>
         </div>
-        <div className="min-w-0">
-          <h1 className="text-lg sm:text-xl font-bold text-ink dark:text-white leading-tight truncate"
-              data-testid="video-library-student-name">
-            Welcome back, {name}
-          </h1>
-          <div className="flex items-center gap-2 mt-1 overflow-x-auto vl-row-scroll">
-            {points !== null && (
-              <EduHubPointsPill value={points} size="sm" testId="video-library-points-badge" />
-            )}
-            {restrictedBalance > 0 && (
-              <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full"
-                    style={{ background: "rgba(212,168,67,0.12)", border: "1px solid rgba(212,168,67,0.3)", color: GOLD }}
-                    data-testid="video-library-restricted-points-badge"
-                    title="Earmarked for Video Library purchases only — spent automatically before your general points">
-                +{restrictedBalance} Video pts
-              </span>
-            )}
-            {tier && (
-              <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-zinc-600 dark:text-white/60"
-                    data-testid="video-library-tier-badge">
-                <Crown size={10} style={{ color: GOLD }} /> {tier}
-              </span>
-            )}
-            {continueCount > 0 && (
-              <span className="text-[11px] text-zinc-500 dark:text-white/50 inline-flex items-center gap-1">
-                <Sparkles size={10} style={{ color: GOLD }} /> {continueCount} lesson{continueCount > 1 ? "s" : ""} in progress
-              </span>
-            )}
-            <VideoLibraryCouponCard />
+        <div className="vl-identity-actions">
+          {points !== null && <EduHubPointsPill value={points} size="sm" testId="video-library-points-badge" />}
+          <div className="vl-avatar" data-testid="video-library-avatar">
+            {student?.avatar_url
+              ? <img src={student.avatar_url} alt="" />
+              : initials || "?"}
           </div>
         </div>
       </div>
-    </div>
+      <div className="vl-welcome-copy">
+        <div>
+          <p>{greeting}, <span data-testid="video-library-student-name">{name}</span></p>
+          <h1>What will you unlock today?</h1>
+        </div>
+        <div className="vl-welcome-badges vl-row-scroll">
+          {restrictedBalance > 0 && (
+            <span data-testid="video-library-restricted-points-badge" title="Earmarked for Video Library purchases only">
+              +{restrictedBalance} Video pts
+            </span>
+          )}
+          {tier && <span data-testid="video-library-tier-badge"><Crown size={11} /> {tier}</span>}
+          {continueCount > 0 && <span><Sparkles size={11} /> {continueCount} active</span>}
+          <VideoLibraryCouponCard />
+        </div>
+      </div>
+    </header>
   );
 }
 
@@ -162,6 +149,37 @@ function Spotlight({ lesson, progressFraction, onOpen }) {
         </button>
       </div>
       {percent > 0 && <div className="vl-spotlight-progress"><span style={{ width: `${percent}%` }} /></div>}
+    </section>
+  );
+}
+
+function AdaptivePath({ currentLesson, currentProgress, recommendedLesson }) {
+  const percent = Math.round(Math.min(1, Math.max(0, currentProgress || 0)) * 100);
+  if (!currentLesson && !recommendedLesson) return null;
+  return (
+    <section className="vl-adaptive" data-testid="video-library-adaptive-path">
+      <div className="vl-section-heading">
+        <h2>Your adaptive path</h2>
+        <span>Based on your learning</span>
+      </div>
+      <div className="vl-adaptive-grid">
+        {currentLesson && percent > 0 && (
+          <article className="vl-insight vl-insight-primary">
+            <span className="vl-insight-icon"><Target size={17} /></span>
+            <strong>{percent}%</strong>
+            <h3>Keep your momentum</h3>
+            <p>Continue “{currentLesson.title}” from where you stopped.</p>
+          </article>
+        )}
+        {recommendedLesson && (
+          <article className="vl-insight">
+            <span className="vl-insight-icon"><TrendingUp size={17} /></span>
+            <strong>Next</strong>
+            <h3>Build speaking flow</h3>
+            <p>{CATEGORY_LABELS[recommendedLesson.category] || "A new lesson"} matches your recent practice.</p>
+          </article>
+        )}
+      </div>
     </section>
   );
 }
@@ -309,27 +327,23 @@ export default function VideoLibraryDashboard() {
   let rowIdx = 0;
 
   return (
-    <div className="pb-10" data-testid="video-library-dashboard">
+    <div className="vl-dashboard pb-10" data-testid="video-library-dashboard">
       <WelcomeHeader student={student} continueCount={continueWatchingLessons.length} />
 
       <div className="px-4 sm:px-6">
         <AvailableCouponsPanel />
       </div>
 
-      {!loading && !isFilteredView && (
-        <Spotlight lesson={spotlightLesson} progressFraction={spotlightLesson ? progressByLesson[spotlightLesson.lessonId] : 0} onOpen={openLesson} />
-      )}
-
       {/* Search + sort */}
-      <div className="px-4 sm:px-6 mb-3 flex items-center gap-2">
-        <div className="relative flex-1 max-w-md">
+      <div className="vl-discovery-controls">
+        <div className="vl-search-wrap">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 dark:text-white/40" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search lessons, vocabulary, expressions…"
             data-testid="video-library-search-input"
-            className="w-full rounded-full border border-zinc-200 dark:border-white/10 bg-white dark:bg-white/5 pl-9 pr-9 py-2 text-[13px] text-ink dark:text-white placeholder:text-zinc-400 dark:placeholder:text-white/35 focus:outline-none focus:border-[rgba(212,168,67,0.5)] transition-colors"
+            className="vl-search-input"
           />
           {query && (
             <button onClick={() => setQuery("")} data-testid="video-library-search-clear"
@@ -338,27 +352,24 @@ export default function VideoLibraryDashboard() {
             </button>
           )}
         </div>
-        <div className="relative flex-shrink-0">
+        <div className="vl-sort-wrap">
           <ArrowDownWideNarrow size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-400 dark:text-white/40" />
           <select value={sort} onChange={(e) => setSort(e.target.value)}
                   data-testid="video-library-sort-select"
-                  className="appearance-none rounded-full border border-zinc-200 dark:border-white/10 bg-white dark:bg-white/5 pl-8 pr-4 py-2 text-[12px] font-semibold text-ink dark:text-white/80 focus:outline-none">
+                  className="vl-sort-select" aria-label="Sort lessons">
             {SORTS.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
           </select>
         </div>
       </div>
 
       {/* Level tabs */}
-      <div className="flex gap-2 px-4 sm:px-6 mb-2.5 overflow-x-auto vl-row-scroll">
+      <div className="vl-filter-row vl-filter-row-primary vl-row-scroll">
         {DIFFICULTY_TABS.map((tab) => (
           <button
             key={tab.key || "all"}
             onClick={() => setDifficulty(tab.key)}
             data-testid={`video-library-difficulty-tab-${tab.key || "all"}`}
-            className="vl-chip px-3 py-1.5 rounded-full text-[12px] font-semibold whitespace-nowrap"
-            style={difficulty === tab.key
-              ? { background: "rgba(212,168,67,0.16)", color: GOLD, border: "1px solid rgba(212,168,67,0.35)" }
-              : { background: "rgba(255,255,255,0.05)", color: "inherit", border: "1px solid rgba(255,255,255,0.08)" }}
+            className={`vl-chip ${difficulty === tab.key ? "is-active" : ""}`}
           >
             {tab.label}
           </button>
@@ -366,26 +377,31 @@ export default function VideoLibraryDashboard() {
       </div>
 
       {/* Category chips */}
-      <div className="flex gap-2 px-4 sm:px-6 mb-5 overflow-x-auto vl-row-scroll">
+      <div className="vl-filter-row vl-filter-row-secondary vl-row-scroll">
         <button onClick={() => setCategoryFilter("")}
                 data-testid="video-library-category-chip-all"
-                className="vl-chip px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap"
-                style={!categoryFilter
-                  ? { background: "rgba(212,168,67,0.16)", color: GOLD, border: "1px solid rgba(212,168,67,0.35)" }
-                  : { background: "rgba(255,255,255,0.04)", color: "inherit", border: "1px solid rgba(255,255,255,0.08)" }}>
+                className={`vl-chip ${!categoryFilter ? "is-active" : ""}`}>
           All topics
         </button>
         {CATEGORY_ROWS.map((c) => (
           <button key={c.key} onClick={() => setCategoryFilter(categoryFilter === c.key ? "" : c.key)}
                   data-testid={`video-library-category-chip-${c.key}`}
-                  className="vl-chip px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap"
-                  style={categoryFilter === c.key
-                    ? { background: "rgba(212,168,67,0.16)", color: GOLD, border: "1px solid rgba(212,168,67,0.35)" }
-                    : { background: "rgba(255,255,255,0.04)", color: "inherit", border: "1px solid rgba(255,255,255,0.08)" }}>
+                  className={`vl-chip ${categoryFilter === c.key ? "is-active" : ""}`}>
             {CATEGORY_LABELS[c.key]}
           </button>
         ))}
       </div>
+
+      {!loading && !isFilteredView && (
+        <>
+          <Spotlight lesson={spotlightLesson} progressFraction={spotlightLesson ? progressByLesson[spotlightLesson.lessonId] : 0} onOpen={openLesson} />
+          <AdaptivePath
+            currentLesson={continueWatchingLessons[0]}
+            currentProgress={continueWatchingLessons[0] ? progressByLesson[continueWatchingLessons[0].lessonId] : 0}
+            recommendedLesson={recommended[0]}
+          />
+        </>
+      )}
 
       {error && (
         <div className="mx-4 sm:mx-6 mb-4 text-[13px] text-red-400" data-testid="video-library-error">
