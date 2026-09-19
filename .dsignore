@@ -1,0 +1,11 @@
+src/routes/**
+src/router.tsx
+src/routeTree.gen.ts
+src/start.ts
+src/integrations/supabase/**
+src/lib/**
+src/data/**
+src/assets/**
+imported-delivery/**
+supabase/**
+roadmap.md
