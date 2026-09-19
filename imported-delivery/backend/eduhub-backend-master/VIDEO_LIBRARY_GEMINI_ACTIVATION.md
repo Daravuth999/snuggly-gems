@@ -29,6 +29,20 @@ engine. Gemini remains responsible for translation, grammar, vocabulary,
 summaries, explanations, and story analysis. These secrets belong on the
 Render backend only; never add them to Vercel or any `REACT_APP_*` variable.
 
+Timing runs through a single guarded path for every provider
+(`video_word_alignment.run_word_alignment`): Gemini produces the canonical
+`paragraphs -> sentences -> words` structure that sentence IDs, speaker labels
+and the educational analysis are keyed to, and the selected provider's measured
+word start/end times are merged onto that structure. Consequences:
+
+* `VIDEO_ALIGNMENT_MAX_SECONDS` is enforced before any paid timing upload,
+  for ElevenLabs exactly as for Gemini.
+* A provider outage degrades to the existing interpolated timing and is
+  labeled honestly. It never triggers a second transcription call, so a
+  failure costs one attempt, not two.
+* Sentence identity is stable, so existing translations, grammar notes and
+  vocabulary attached to sentences keep working unchanged.
+
 Get a key from [Google AI Studio](https://aistudio.google.com/apikey) if
 one isn't already provisioned — check first, since this codebase's other
 Gemini integrations (`voice_treasure_gemini.py`, `ai_assistant_tools.py`,
