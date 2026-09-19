@@ -1,11 +1,80 @@
 @import "tailwindcss";
 
+@theme {
+  --color-ink-950: oklch(0.15 0.03 275);
+  --color-ink-900: oklch(0.19 0.035 275);
+  --color-ink-800: oklch(0.25 0.035 275);
+  --color-ink-700: oklch(0.33 0.035 275);
+  --color-ink-300: oklch(0.78 0.02 275);
+  --color-ink-400: oklch(0.68 0.025 275);
+  --color-accent: oklch(0.72 0.16 295);
+  --color-accent-soft: oklch(0.8 0.13 220);
+  --radius-app: 1.25rem;
+}
+
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
 }
 
+html {
+  background: var(--color-ink-950);
+  -webkit-text-size-adjust: 100%;
+}
+
 body {
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  background:
+    radial-gradient(90rem 40rem at 50% -18rem, oklch(0.32 0.12 295 / 0.55), transparent 65%),
+    radial-gradient(70rem 36rem at 90% 110%, oklch(0.32 0.1 220 / 0.35), transparent 60%),
+    var(--color-ink-950);
+  background-attachment: fixed;
+  color: oklch(0.96 0.01 275);
+  overscroll-behavior-y: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+a,
+input,
+select {
+  -webkit-tap-highlight-color: transparent;
+}
+
+@utility app-safe-top {
+  padding-top: calc(env(safe-area-inset-top) + 1rem);
+}
+
+@utility app-safe-bottom {
+  padding-bottom: calc(env(safe-area-inset-bottom) + 2rem);
+}
+
+@utility glass {
+  background: oklch(0.24 0.03 275 / 0.55);
+  border: 1px solid oklch(0.85 0.05 275 / 0.1);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+}
+
+@utility press {
+  transition: transform 140ms cubic-bezier(0.2, 0.8, 0.3, 1), opacity 140ms ease;
+}
+.press:active {
+  transform: scale(0.97);
+}
+
+@keyframes app-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@utility rise {
+  animation: app-rise 380ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
 }
