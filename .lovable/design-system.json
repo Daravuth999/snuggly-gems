@@ -2,7 +2,7 @@
   "meta": {
     "name": "Cozy Code Library",
     "package": "@ws-6c53600b512e8507bc41/ecbaf85a-34c2-47e8-b608-f9508e98f212",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "framework": "react",
     "css_framework": "tailwind",
     "starter_template": "custom_design_system_tailwind",
@@ -11,7 +11,7 @@
     ],
     "source_type": "local",
     "source_manifest": {
-      "#enrichment": "b68c8d9e5149594857f86226799f4ffc6643b5d5596850ca1739c6daec05a6f5",
+      "#enrichment": "dc53e40c0ef40130f750ea3490ddbc44de67522e5850ff374df601670bc9f394",
       ".gitignore": "6059213806e442947666752f3db6bfdc",
       ".lovable/meta.yaml": "954a981e8847ec1692669dbb04ae9ae9",
       ".lovable/plan/restore-admin-password-access-2026-09-19.md": "9fdd031d7e0f1a799cf5b802adb3c577",
@@ -21,44 +21,196 @@
       "eslint.config.js": "07a67437fb1a45ab36d6de0145ff09de",
       "mockupPreviewPlugin.ts": "8024d439734f27417621536969f64db1",
       "package.json": "f157a32032b95344f28a5ca26a5142fc",
-      "public/favicon.ico": "9f504444f85a5af2eef9264b02ae40be",
+      "public/app-icon-512.png": "f45d61196ab7d6f020db207408d9126b",
+      "public/favicon.png": "33cc3564e4e2e45b1bbb0a4b3e6c7e82",
+      "public/manifest.webmanifest": "2453b5a9f366d9e3e1ff5cc33300db84",
       "public/videos/Maya-and-Kip-narration.mp3": "3209abdd86d89e8f0917b0401d7bfb82",
+      "roadmap.md": "602474dea47a0c84348dfb712af39a51",
       "src/assets/maya-and-kip-narrated.mp4.asset.json": "f301f68a738412d44c08c2e0ef2c6611",
+      "src/components/app-ui.tsx": "62009f3497c09b6e87da504eda4c6bb0",
+      "src/components/karaoke-prompter.tsx": "b0357fdf086dea0934e1c739209a131e",
       "src/data/lesson.ts": "d5ee3ce9e13911b2e98f54a8c86ce93a",
       "src/index.ts": "6ea820a7dddee95aff20995ab7b52668",
       "src/integrations/supabase/auth-middleware.ts": "eabaf8c8ba32205717921ce5f255185e",
       "src/integrations/supabase/client.server.ts": "23f838ab7633e0a97e695f3c500d91aa",
       "src/integrations/supabase/client.ts": "8af43e12f1332b440278c7ea7e4cb1e8",
       "src/integrations/supabase/previewAuthStorage.ts": "bc45a76c9242c4b85d6d4345625c46e9",
-      "src/integrations/supabase/types.ts": "cf28825eedfa606b57434abbb6fba222",
+      "src/integrations/supabase/types.ts": "82c9f75c610637e17ed3646c0b464e0f",
       "src/lib/ai.server.ts": "728e5186403e8a9350f23dd02c2c0a92",
       "src/lib/audio.ts": "659521c904bf4241fc227d495e1efe20",
-      "src/lib/studio.functions.ts": "cfad1a633972a4886d8a8dc399e217d3",
+      "src/lib/studio.functions.ts": "8d646aa18b5596a35efa400fb69dcc0a",
       "src/mockup-preview.d.ts": "38969839f35ce2966e32a9f01a5c09ea",
       "src/routeTree.gen.ts": "00bd52e86242d57358f0d5945cbbc7fb",
       "src/router.tsx": "8f905e713b0eba7fa8148b7995a708c9",
       "src/routes/[__component].preview.$.tsx": "3a40af1fe37daff2e891175a6e6d4f99",
       "src/routes/[__mockup].preview.$.tsx": "5d9f42470848aa60148f20f9580e240e",
-      "src/routes/__root.tsx": "56e470ff2c45540f15205ca71016ac53",
-      "src/routes/_authenticated/route.tsx": "df7a428994316837d0878aff0dde8e5d",
-      "src/routes/_authenticated/studio/$videoId.tsx": "a7299a71047272c5a28ce9aadf792b88",
-      "src/routes/_authenticated/studio/index.tsx": "42d3a0285a1a8078729b5b53879c6537",
-      "src/routes/auth.tsx": "c74578b09bbd80107beb1befdebe8360",
+      "src/routes/__root.tsx": "4983282193957c2036ac72903d369ac5",
+      "src/routes/_authenticated/route.tsx": "2cb984b3a46593f0a9bfa4054712d983",
+      "src/routes/_authenticated/studio/$videoId.tsx": "b0918dc093e30d06f5a4fc4ca1fca8b4",
+      "src/routes/_authenticated/studio/index.tsx": "41ffbad9f4e41e19f8ac964621409668",
+      "src/routes/auth.tsx": "e9c29da80435aa27cae2a5d425453d64",
       "src/routes/index.tsx": "1717361072deed7066c638f595aae0d1",
-      "src/routes/reset-password.tsx": "c670081ab05b3360b35dd290213c4066",
+      "src/routes/reset-password.tsx": "0427eaa713422cb43070ca8fd08b068f",
       "src/start.ts": "2ee6931ade71e8adb83bd435ef05e11e",
-      "src/styles.css": "9c2424521590fe8f6bc92f08d4f45dd7",
+      "src/styles.css": "66840547f34996a5dbffe37ecbe26591",
       "supabase/config.toml": "86b440d432d0c883c96d3c2c3dd91943",
       "supabase/migrations/20260919000022_915254a3-6984-43f0-93b9-7bea5e90c404.sql": "d05ab04df3d2d8b9ecdafcaa388e7a10",
       "supabase/migrations/20260919000045_7044e394-559c-4453-8bad-e5b5d3cd19b5.sql": "68411c5b481687c506e783e62f106ecc",
+      "supabase/migrations/20260919014328_29470aa4-aac2-4a4a-841c-aaa80d017bce.sql": "8544bec15dbdacb6c9d6398443710749",
       "tsconfig.json": "994abf64c2b9f78b568879f80ed0170e",
       "vite.config.ts": "10fea87378c29c17e52270c6a209cb41",
       "wrangler.jsonc": "680b897d48e44bcc65fe437c29b38f3b"
     },
     "pipeline_version": 8
   },
-  "tokens": {},
+  "tokens": {
+    "color": [
+      {
+        "name": "--color-ink-950",
+        "raw": "oklch(0.15 0.03 275)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--color-ink-900",
+        "raw": "oklch(0.19 0.035 275)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--color-ink-800",
+        "raw": "oklch(0.25 0.035 275)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--color-ink-700",
+        "raw": "oklch(0.33 0.035 275)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--color-ink-300",
+        "raw": "oklch(0.78 0.02 275)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--color-ink-400",
+        "raw": "oklch(0.68 0.025 275)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--color-accent",
+        "raw": "oklch(0.72 0.16 295)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--color-accent-soft",
+        "raw": "oklch(0.8 0.13 220)",
+        "source": "src/styles.css"
+      }
+    ],
+    "radius": [
+      {
+        "name": "--radius-app",
+        "raw": "1.25rem",
+        "source": "src/styles.css"
+      }
+    ]
+  },
   "components": [
+    {
+      "name": "Screen",
+      "file": "src/components/app-ui",
+      "import_path": ""
+    },
+    {
+      "name": "TopBar",
+      "file": "src/components/app-ui",
+      "import_path": ""
+    },
+    {
+      "name": "Card",
+      "file": "src/components/app-ui",
+      "import_path": ""
+    },
+    {
+      "name": "Button",
+      "file": "src/components/app-ui",
+      "import_path": "",
+      "props": [
+        {
+          "name": "children",
+          "type": "any",
+          "required": true
+        },
+        {
+          "name": "onClick",
+          "type": "function"
+        },
+        {
+          "name": "type",
+          "type": "enum",
+          "values": [
+            "button",
+            "submit"
+          ],
+          "default": "button"
+        },
+        {
+          "name": "disabled",
+          "type": "boolean"
+        },
+        {
+          "name": "variant",
+          "type": "enum",
+          "values": [
+            "primary",
+            "outline",
+            "ghost"
+          ],
+          "default": "primary"
+        },
+        {
+          "name": "className",
+          "type": "string",
+          "default": "min-h-dvh app-safe-bottom"
+        }
+      ]
+    },
+    {
+      "name": "Field",
+      "file": "src/components/app-ui",
+      "import_path": ""
+    },
+    {
+      "name": "Banner",
+      "file": "src/components/app-ui",
+      "import_path": ""
+    },
+    {
+      "name": "Spinner",
+      "file": "src/components/app-ui",
+      "import_path": ""
+    },
+    {
+      "name": "Wave",
+      "file": "src/components/app-ui",
+      "import_path": ""
+    },
+    {
+      "name": "KaraokePrompter",
+      "file": "src/components/karaoke-prompter",
+      "import_path": "",
+      "props": [
+        {
+          "name": "videoUrl",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "words",
+          "type": "any",
+          "required": true
+        }
+      ]
+    },
     {
       "name": "Constants",
       "file": "src/integrations/supabase/types",
