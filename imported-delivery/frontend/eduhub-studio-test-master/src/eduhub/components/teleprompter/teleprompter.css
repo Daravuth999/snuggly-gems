@@ -1,5 +1,14 @@
-/* teleprompter.css — reading-surface polish for the shared Teleprompter
-   and the Video Library transcript panel. Scoped by tp- prefixes. */
+/* Cinematic Focus V3 — shared student/author reading surface. */
+
+:root {
+  --tp-ink: #f8f5ed;
+  --tp-muted: rgba(238, 240, 246, 0.56);
+  --tp-gold: #d4a843;
+  --tp-mint: #8fd6a8;
+  --tp-surface: rgba(15, 18, 27, 0.96);
+  --tp-line: rgba(255, 255, 255, 0.09);
+  --tp-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
 
 @keyframes tp-rise {
   from { opacity: 0; transform: translate(-50%, 8px); }
@@ -14,13 +23,29 @@
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 44px, #000 calc(100% - 36px), transparent 100%);
   mask-image: linear-gradient(to bottom, transparent 0, #000 44px, #000 calc(100% - 36px), transparent 100%);
   overscroll-behavior: contain;
+  scroll-behavior: auto;
+  scrollbar-width: none;
 }
+.tp-viewport::-webkit-scrollbar { display: none; }
 
 .tp-stage {
-  background: linear-gradient(180deg, rgba(8, 12, 22, 0.98), rgba(12, 17, 28, 0.96));
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  isolation: isolate;
+  background:
+    linear-gradient(180deg, rgba(18, 22, 31, 0.98), rgba(8, 10, 16, 0.99)),
+    radial-gradient(circle at 50% 24%, rgba(212, 168, 67, 0.11), transparent 42%);
+  border: 1px solid var(--tp-line);
   border-radius: 8px;
   overflow: hidden;
+  box-shadow: inset 0 1px rgba(255,255,255,.04), 0 24px 80px rgba(0,0,0,.28);
+}
+
+.tp-stage::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.018), transparent);
+  z-index: -1;
 }
 
 .tp-sync-status {
@@ -62,6 +87,9 @@
    only when highlighted would widen it, shifting every word after it on
    the line (visible as a harsh "jump" — the exact defect this fixes). */
 .tp-word {
+  position: relative;
+  z-index: 0;
+  display: inline;
   border-radius: 4px;
   padding: 0 3px;
   margin: 0 -3px;
@@ -77,12 +105,65 @@
               opacity 300ms ease;
 }
 
+.tp-word::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: -2px -1px;
+  border-radius: 6px;
+  opacity: 0;
+  transform: scaleX(.72);
+  background: linear-gradient(90deg, rgba(212,168,67,.28), rgba(255,230,164,.52), rgba(212,168,67,.2));
+  transform-origin: left center;
+}
+
 .tp-word[data-word-active="true"] {
-  box-shadow: 0 0 0 1px rgba(255, 225, 154, 0.34), 0 0 18px rgba(212, 168, 67, 0.24);
+  text-shadow: 0 0 16px rgba(255, 224, 145, .55);
+  box-shadow: 0 0 0 1px rgba(255,225,154,.24), 0 0 24px rgba(212,168,67,.24);
+}
+
+.tp-word-karaoke::before {
+  opacity: 1;
+  animation: tp-word-sweep var(--tp-word-duration, 220ms) linear both;
+}
+
+@keyframes tp-word-sweep {
+  from { transform: scaleX(.12); opacity: .58; }
+  to { transform: scaleX(1); opacity: 1; }
 }
 
 .tp-sentence {
-  transition: opacity 420ms ease, background-color 300ms ease, border-color 300ms ease, transform 420ms ease;
+  transition: opacity 420ms var(--tp-ease), background-color 300ms var(--tp-ease), border-color 300ms var(--tp-ease), transform 420ms var(--tp-ease), box-shadow 300ms var(--tp-ease);
+}
+
+.tp-dialogue {
+  border-radius: 8px;
+  padding: 14px 16px;
+  backdrop-filter: blur(14px);
+}
+
+.tp-sentence-current {
+  box-shadow: 0 18px 50px rgba(0,0,0,.2);
+}
+
+.tp-speaker {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 7px;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.tp-speaker-avatar {
+  width: 22px;
+  height: 22px;
+  border: 1px solid;
+  border-radius: 50%;
+  display: inline-grid;
+  place-items: center;
+  background: rgba(255,255,255,.04);
 }
 
 /* Same reserved-footprint technique for the flowing-paragraph (storytelling)
@@ -97,7 +178,7 @@
   border-radius: 4px;
   padding: 1px 2px;
   margin: -1px -2px;
-  transition: opacity 420ms ease, background-color 300ms ease, transform 420ms ease;
+  transition: opacity 420ms var(--tp-ease), background-color 300ms var(--tp-ease), transform 420ms var(--tp-ease), box-shadow 300ms var(--tp-ease);
 }
 
 /* §4 confidence-tiered rendering — the "uncertain" tier's own deliberate
@@ -156,12 +237,48 @@
   animation: tp-rise 240ms ease both;
 }
 
+.tp-settings-label {
+  margin-bottom: 8px;
+  color: rgba(255,255,255,.46);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.tp-preset {
+  min-width: 0;
+  min-height: 78px;
+  padding: 10px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  border: 1px solid var(--tp-line);
+  border-radius: 8px;
+  color: rgba(255,255,255,.62);
+  background: rgba(255,255,255,.025);
+  text-align: left;
+  transition: transform 180ms var(--tp-ease), border-color 180ms var(--tp-ease), background-color 180ms var(--tp-ease);
+}
+.tp-preset b, .tp-preset small { display: block; }
+.tp-preset b { color: var(--tp-ink); font-size: 11px; }
+.tp-preset small { margin-top: 2px; color: var(--tp-muted); font-size: 9px; line-height: 1.25; }
+.tp-preset-active { border-color: rgba(212,168,67,.55); background: rgba(212,168,67,.1); color: var(--tp-gold); }
+.tp-preset:active { transform: scale(.98); }
+
+.tp-settings-group { padding: 10px 12px; border: 1px solid var(--tp-line); border-radius: 8px; background: rgba(255,255,255,.02); }
+.tp-settings-disclosure { width: 100%; min-height: 42px; display: flex; align-items: center; justify-content: space-between; color: rgba(255,255,255,.68); font-size: 12px; }
+.tp-settings-disclosure > span { display: inline-flex; align-items: center; gap: 7px; }
+.tp-settings-disclosure svg { transition: transform 180ms var(--tp-ease); }
+.tp-settings-reset { color: rgba(255,255,255,.45); font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
+
 @media (prefers-reduced-motion: reduce) {
   .tp-word,
   .tp-sentence,
   .tp-sentence-story {
     transition: none !important;
   }
+  .tp-word-karaoke::before { animation: none !important; transform: scaleX(1); }
   .tp-translation {
     animation: none !important;
     opacity: 1;

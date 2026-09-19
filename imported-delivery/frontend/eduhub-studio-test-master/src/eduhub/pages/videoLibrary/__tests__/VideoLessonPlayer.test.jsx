@@ -492,6 +492,33 @@ describe("study surface tabs", () => {
   });
 });
 
+describe("V3 cinematic practice tools", () => {
+  test("opens searchable Script above the live karaoke surface and seeks through saved timing", async () => {
+    getLesson.mockResolvedValue(freeOwnedLesson());
+    getSyncDocument.mockResolvedValue(SYNC_WITH_WORDS);
+    render(<VideoLessonPlayer />);
+    const video = await screen.findByTestId("video-player-element");
+    Object.defineProperty(video, "currentTime", { value: 0, writable: true });
+    fireEvent.click(await screen.findByTestId("video-open-script-button"));
+    expect(screen.getByTestId("video-script-overlay")).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId("video-transcript-search"), { target: { value: "Hello" } });
+    fireEvent.click(screen.getAllByText("Hello").find((node) => node.closest("button")));
+    expect(video.currentTime).toBe(0);
+    expect(screen.queryByTestId("video-script-overlay")).not.toBeInTheDocument();
+  });
+
+  test("opens Gemini learning details without replacing the synchronized teleprompter", async () => {
+    getLesson.mockResolvedValue(freeOwnedLesson({ learning: { vocabulary: [{ word: "hello", definition: "a greeting" }] } }));
+    getSyncDocument.mockResolvedValue(SYNC_WITH_WORDS);
+    render(<VideoLessonPlayer />);
+    await screen.findByTestId("teleprompter-storytelling");
+    fireEvent.click(screen.getByTestId("video-open-learning-button"));
+    expect(screen.getByTestId("video-learning-sheet")).toBeInTheDocument();
+    expect(screen.getByTestId("teleprompter-storytelling")).toBeInTheDocument();
+    expect(screen.getByText("a greeting")).toBeInTheDocument();
+  });
+});
+
 // ── Priority 2 (user directive): "when the user presses Play the karaoke
 //    highlight jumps toward the end". A prior investigation traced this to
 //    video_ai_provider.segments_to_sync trusting an out-of-order Gemini

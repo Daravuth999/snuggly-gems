@@ -5,7 +5,7 @@
  * missing field collapses cleanly rather than showing a placeholder.
  * Exports LessonCardSkeleton for the dashboard's loading state.
  */
-import { Play, Lock, Clock, GraduationCap, User, CheckCircle2 } from "lucide-react";
+import { Play, Lock, Clock, GraduationCap, User, CheckCircle2, AudioLines } from "lucide-react";
 
 const GOLD = "#D4A843";
 
@@ -45,7 +45,7 @@ export function LessonCardSkeleton() {
   );
 }
 
-export default function LessonCard({ lesson, progressFraction, onOpen }) {
+export default function LessonCard({ lesson, progressFraction, onOpen, featured = false }) {
   const {
     title, subtitle, thumbnailUrl, instructor, category, difficulty, cefrLevel,
     durationSec, estimatedStudyMinutes, price, owned,
@@ -58,7 +58,7 @@ export default function LessonCard({ lesson, progressFraction, onOpen }) {
     <button
       onClick={() => onOpen?.(lesson)}
       data-testid={`video-lesson-card-${lesson.lessonId}`}
-      className="vl-card group relative flex-shrink-0 w-[168px] sm:w-[196px] text-left rounded-xl overflow-hidden border border-white/10 bg-white/[0.03]"
+      className={`vl-card group relative flex-shrink-0 text-left overflow-hidden ${featured ? "vl-card-featured w-[82vw] max-w-[420px] sm:w-[380px]" : "w-[176px] sm:w-[214px]"}`}
     >
       <div className="relative aspect-video bg-black/40 overflow-hidden">
         {thumbnailUrl ? (
@@ -105,6 +105,12 @@ export default function LessonCard({ lesson, progressFraction, onOpen }) {
           </span>
         )}
 
+        {lesson.syncId && (
+          <span className="vl-sync-mark" title="Word-synchronized lesson">
+            <AudioLines size={10} /> Word sync
+          </span>
+        )}
+
         {hasProgress && (
           <div className="absolute bottom-0 left-0 right-0 h-[3px] bg-black/50">
             <div className="h-full" style={{ width: `${Math.min(100, progressFraction * 100)}%`, background: GOLD }} />
@@ -112,8 +118,8 @@ export default function LessonCard({ lesson, progressFraction, onOpen }) {
         )}
       </div>
 
-      <div className="p-2.5 space-y-1">
-        <div className="text-[12.5px] font-semibold leading-snug text-ink dark:text-white line-clamp-2">{title}</div>
+      <div className={featured ? "p-4 space-y-1.5" : "p-3 space-y-1"}>
+        <div className={`${featured ? "text-[16px]" : "text-[12.5px]"} font-semibold leading-snug text-ink dark:text-white line-clamp-2`}>{title}</div>
         {subtitle && <div className="text-[10.5px] text-zinc-500 dark:text-white/45 line-clamp-1">{subtitle}</div>}
         <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
           {category && (

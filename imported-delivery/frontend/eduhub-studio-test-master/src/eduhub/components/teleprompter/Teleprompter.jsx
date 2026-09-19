@@ -171,12 +171,14 @@ function SentenceWords({ sentence, state, config, onSeek, tier = "high" }) {
       <span
         key={i}
         onClick={onSeek ? () => onSeek(w.start) : undefined}
-        className={`tp-word${onSeek ? " cursor-pointer" : ""}`}
+        className={`tp-word${karaokeActive ? " tp-word-karaoke" : ""}${isPast ? " tp-word-spoken" : ""}${onSeek ? " cursor-pointer" : ""}`}
         data-word-active={isActive || undefined}
+        aria-hidden="true"
         style={{
-          color: karaokeActive ? "#111" : highlightActive ? GOLD : lowConf ? "#f0a8a8" : undefined,
+          "--tp-word-duration": `${Math.max(0.12, Math.min(1.5, (Number(w.end) || 0) - (Number(w.start) || 0)))}s`,
+          color: karaokeActive ? "#fff8df" : highlightActive ? GOLD : lowConf ? SOFT_GOLD : undefined,
           background: karaokeActive
-            ? GOLD
+            ? "rgba(212,168,67,0.16)"
             : highlightActive
               ? "rgba(212,168,67,0.14)"
               : lowConf ? "rgba(240,80,80,0.10)" : "transparent",
@@ -221,9 +223,11 @@ const ConversationSentence = memo(function ConversationSentence({
     <div ref={(el) => registerRef(idx, el)}
          className={`flex ${config.centered ? "justify-center" : side ? "justify-end" : "justify-start"}`}>
       <div
-        className="tp-sentence max-w-[85%] rounded-2xl px-3.5 py-2.5"
+        className={`tp-sentence tp-dialogue max-w-[92%] ${isCurrent ? "tp-sentence-current" : ""}`}
         data-testid={`teleprompter-sentence-${idx}`}
         data-confidence-tier={isCurrent ? tier : undefined}
+        aria-label={(meta.s.words || []).map((w) => w.word).join(" ")}
+        aria-current={isCurrent ? "true" : undefined}
         style={{
           background: uncertain ? "rgba(168,150,122,0.09)" : active ? "rgba(212,168,67,0.13)" : "rgba(255,255,255,0.045)",
           border: `1px ${uncertain ? "dashed" : "solid"} ${
@@ -234,7 +238,8 @@ const ConversationSentence = memo(function ConversationSentence({
         }}
       >
         {sid && (
-          <div className="text-[10px] font-bold uppercase tracking-wider mb-1" style={{ color: speakerColor }}>
+          <div className="tp-speaker" style={{ color: speakerColor }}>
+            <span className="tp-speaker-avatar" style={{ borderColor: speakerColor }}>{String(speakerLabel || sid).slice(0, 1)}</span>
             {speakerLabel || sid}
           </div>
         )}
@@ -264,7 +269,9 @@ const StorySentence = memo(function StorySentence({ meta, idx, store, config, on
       ref={(el) => registerRef(idx, el)}
       data-testid={`teleprompter-sentence-${idx}`}
       data-confidence-tier={isCurrent ? tier : undefined}
-      className={`tp-sentence tp-sentence-story${uncertain ? " tp-sentence-uncertain" : ""}`}
+       className={`tp-sentence tp-sentence-story${uncertain ? " tp-sentence-uncertain" : ""}${isCurrent ? " tp-sentence-current" : ""}`}
+       aria-label={(meta.s.words || []).map((w) => w.word).join(" ")}
+       aria-current={isCurrent ? "true" : undefined}
       style={{
         background: uncertain ? "rgba(168,150,122,0.08)" : active ? "rgba(212,168,67,0.10)" : "transparent",
         opacity: visual.opacity,
@@ -437,12 +444,12 @@ function Teleprompter({
 
   if (resolvedMode === "conversation") {
     return (
-      <div className={`tp-stage relative flex flex-col min-h-0 ${className}`}>
+      <div className={`tp-stage tp-stage-conversation relative flex flex-col min-h-0 ${className}`}>
         <div className="tp-sync-status" aria-label={measuredTiming ? "Audio-synced word timing" : "Estimated word timing"}>
           <span className={`tp-sync-dot${measuredTiming ? " tp-sync-dot-live" : ""}`} aria-hidden="true" />
           {measuredTiming ? "Audio-synced" : "Estimated timing"}
         </div>
-        <div ref={containerRef} className="tp-viewport flex-1 min-h-0 overflow-y-auto px-4 py-5 space-y-3"
+        <div ref={containerRef} className="tp-viewport flex-1 min-h-0 overflow-y-auto px-4 py-7 space-y-4"
              data-testid="teleprompter-conversation"
              style={{ fontFamily }}>
           {metas.map((meta, idx) => (
@@ -469,13 +476,13 @@ function Teleprompter({
   // Storytelling: flowing paragraphs, generous line-height for reading along.
   let flatIdx = -1;
   return (
-    <div className={`tp-stage relative flex flex-col min-h-0 ${className}`}>
+    <div className={`tp-stage tp-stage-story relative flex flex-col min-h-0 ${className}`}>
       <div className="tp-sync-status" aria-label={measuredTiming ? "Audio-synced word timing" : "Estimated word timing"}>
         <span className={`tp-sync-dot${measuredTiming ? " tp-sync-dot-live" : ""}`} aria-hidden="true" />
         {measuredTiming ? "Audio-synced" : "Estimated timing"}
       </div>
       <div ref={containerRef}
-           className="tp-viewport flex-1 min-h-0 overflow-y-auto px-5 py-6 space-y-5"
+           className="tp-viewport flex-1 min-h-0 overflow-y-auto px-5 py-8 space-y-6"
            data-testid="teleprompter-storytelling"
            style={{ fontFamily }}>
         {(sync.paragraphs || []).map((p) => {

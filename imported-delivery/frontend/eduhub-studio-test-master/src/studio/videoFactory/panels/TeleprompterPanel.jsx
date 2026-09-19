@@ -115,12 +115,12 @@ export default function TeleprompterPanel({ lesson, onChanged }) {
   const isVideo = (lesson.contentType || "").startsWith("video/");
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-4" data-testid="production-teleprompter-panel">
+    <div className="grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)] gap-4" data-testid="production-teleprompter-panel">
       <div className="space-y-3">
         <div className="text-[11px] font-bold uppercase tracking-wider text-faded flex items-center gap-1.5">
           <MonitorPlay size={11} className="text-amber-300" /> Student experience defaults
         </div>
-        <div className="rounded-xl border border-white/10 bg-black/20 p-3 text-white">
+        <div className="rounded-lg border border-white/10 bg-black/20 p-3 text-white">
           <TeleprompterSettings config={config} onChange={setConfig}
                                 onReset={(d) => setConfig(d)} showModeControls />
         </div>
@@ -146,7 +146,7 @@ export default function TeleprompterPanel({ lesson, onChanged }) {
           proven correct in VideoLessonPlayer.jsx's side panel, so
           useAutoFollow.js's existing internal-scroll math (unchanged) has a
           real clientHeight/scrollHeight gap to work with. */}
-      <div className="rounded-xl border border-white/10 bg-black/40 overflow-hidden flex flex-col min-h-[380px] max-h-[65vh] lg:max-h-[calc(100vh-160px)]">
+      <div className="rounded-lg border border-white/10 bg-black/40 overflow-hidden flex flex-col min-h-[460px] max-h-[72vh] lg:max-h-[calc(100vh-150px)] shadow-2xl">
         {lesson.mediaRef ? (
           <>
             <div className="flex-shrink-0 bg-black">
@@ -200,7 +200,7 @@ export default function TeleprompterPanel({ lesson, onChanged }) {
                 flex context to resolve against — the exact same pattern
                 VideoLessonPlayer.jsx's side panel already uses correctly. */}
             <div className="flex-1 min-h-0 flex flex-col text-white" data-testid="teleprompter-live-preview">
-              <Teleprompter sync={sync} currentTime={currentTime} config={config}
+              <Teleprompter sync={sync} mediaRef={mediaRef} currentTime={currentTime} config={{ ...config, centerFocus: true }}
                             onSeek={(t) => { if (mediaRef.current) mediaRef.current.currentTime = t; }}
                             className="flex-1 min-h-0" />
             </div>

@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Clapperboard, Sparkles, Search, X, Crown, ArrowDownWideNarrow } from "lucide-react";
+import { Clapperboard, Sparkles, Search, X, Crown, ArrowDownWideNarrow, Play, AudioLines, ArrowRight } from "lucide-react";
 import { listLessons, listContinueWatching, listBookmarks, listRecentlyWatched, listMyPurchases, getRestrictedPointsBalance } from "./videoLibraryApi";
 import LessonCard, { LessonCardSkeleton, CATEGORY_LABELS } from "./LessonCard";
 import { useAuth } from "../../context/AuthContext";
@@ -79,7 +79,7 @@ function WelcomeHeader({ student, continueCount }) {
           Video Library
         </span>
       </div>
-      <div className="flex items-center gap-3.5">
+      <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3.5">
         <div className="w-12 h-12 rounded-full flex items-center justify-center text-[15px] font-bold flex-shrink-0"
              data-testid="video-library-avatar"
              style={{ background: "rgba(212,168,67,0.18)", border: "1.5px solid rgba(212,168,67,0.45)", color: GOLD }}>
@@ -92,7 +92,7 @@ function WelcomeHeader({ student, continueCount }) {
               data-testid="video-library-student-name">
             Welcome back, {name}
           </h1>
-          <div className="flex items-center gap-2 mt-1 flex-wrap">
+          <div className="flex items-center gap-2 mt-1 overflow-x-auto vl-row-scroll">
             {points !== null && (
               <EduHubPointsPill value={points} size="sm" testId="video-library-points-badge" />
             )}
@@ -127,15 +127,41 @@ function Row({ title, lessons, progressByLesson, onOpen, testId, index = 0 }) {
   if (!lessons || lessons.length === 0) return null;
   return (
     <section className="space-y-2.5 vl-rise" style={{ animationDelay: `${Math.min(index, 8) * 60}ms` }} data-testid={testId}>
-      <h2 className="text-[13px] font-bold uppercase tracking-wide text-zinc-500 dark:text-white/50 px-4 sm:px-6">
-        {title}
-      </h2>
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-3 px-4 sm:px-6">
+        <h2 className="min-w-0 truncate text-[15px] font-bold text-zinc-800 dark:text-white">{title}</h2>
+        <ArrowRight size={15} className="shrink-0 text-zinc-400 dark:text-white/30" aria-hidden="true" />
+      </div>
       <div className="flex gap-3 overflow-x-auto px-4 sm:px-6 pb-1 vl-row-scroll">
         {lessons.map((lesson) => (
           <LessonCard key={lesson.lessonId} lesson={lesson}
                       progressFraction={progressByLesson[lesson.lessonId]} onOpen={onOpen} />
         ))}
       </div>
+    </section>
+  );
+}
+
+function Spotlight({ lesson, progressFraction, onOpen }) {
+  if (!lesson) return null;
+  const percent = Math.round(Math.min(1, Math.max(0, progressFraction || 0)) * 100);
+  return (
+    <section className="vl-spotlight mx-4 sm:mx-6 mb-7" data-testid="video-library-spotlight">
+      {lesson.thumbnailUrl && <img src={lesson.thumbnailUrl} alt="" className="vl-spotlight-image" />}
+      <div className="vl-spotlight-shade" />
+      <div className="vl-spotlight-copy">
+        <div className="vl-spotlight-kicker"><Sparkles size={12} /> Your next speaking moment</div>
+        <h2>{lesson.title}</h2>
+        {(lesson.subtitle || lesson.description) && <p>{lesson.subtitle || lesson.description}</p>}
+        <div className="vl-spotlight-meta">
+          {lesson.difficulty && <span>{DIFFICULTY_TABS.find((item) => item.key === lesson.difficulty)?.label}</span>}
+          {lesson.syncId && <span><AudioLines size={11} /> Precision word sync</span>}
+          {percent > 0 && <span>{percent}% complete</span>}
+        </div>
+        <button type="button" onClick={() => onOpen(lesson)} className="vl-spotlight-action">
+          <Play size={16} fill="currentColor" /> {percent > 0 ? "Continue shadowing" : "Start lesson"}
+        </button>
+      </div>
+      {percent > 0 && <div className="vl-spotlight-progress"><span style={{ width: `${percent}%` }} /></div>}
     </section>
   );
 }
@@ -279,6 +305,7 @@ export default function VideoLibraryDashboard() {
 
   const openLesson = (lesson) => navigate(`/video-library/watch/${lesson.lessonId}`);
   const isFilteredView = Boolean(categoryFilter || query.trim());
+  const spotlightLesson = continueWatchingLessons[0] || recommended[0] || featured[0] || sortedLessons[0];
   let rowIdx = 0;
 
   return (
@@ -288,6 +315,10 @@ export default function VideoLibraryDashboard() {
       <div className="px-4 sm:px-6">
         <AvailableCouponsPanel />
       </div>
+
+      {!loading && !isFilteredView && (
+        <Spotlight lesson={spotlightLesson} progressFraction={spotlightLesson ? progressByLesson[spotlightLesson.lessonId] : 0} onOpen={openLesson} />
+      )}
 
       {/* Search + sort */}
       <div className="px-4 sm:px-6 mb-3 flex items-center gap-2">
@@ -392,7 +423,7 @@ export default function VideoLibraryDashboard() {
           </div>
         </div>
       ) : (
-        <div className="space-y-7">
+        <div className="space-y-8">
           <Row title="Continue Learning" lessons={continueWatchingLessons} progressByLesson={progressByLesson} onOpen={openLesson} testId="video-library-row-continue" index={rowIdx++} />
           <Row title="Recommended For You" lessons={recommended} progressByLesson={progressByLesson} onOpen={openLesson} testId="video-library-row-recommended" index={rowIdx++} />
           <Row title="Featured Lessons" lessons={featured} progressByLesson={progressByLesson} onOpen={openLesson} testId="video-library-row-featured" index={rowIdx++} />
