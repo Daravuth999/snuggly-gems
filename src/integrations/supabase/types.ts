@@ -119,9 +119,11 @@ export type Database = {
           end_ms: number
           id: string
           idx: number
+          measured: boolean
           speaker: string | null
           start_ms: number
           text: string
+          timing_source: string
           video_id: string
         }
         Insert: {
@@ -131,9 +133,11 @@ export type Database = {
           end_ms: number
           id?: string
           idx: number
+          measured?: boolean
           speaker?: string | null
           start_ms: number
           text: string
+          timing_source?: string
           video_id: string
         }
         Update: {
@@ -143,9 +147,11 @@ export type Database = {
           end_ms?: number
           id?: string
           idx?: number
+          measured?: boolean
           speaker?: string | null
           start_ms?: number
           text?: string
+          timing_source?: string
           video_id?: string
         }
         Relationships: [
@@ -193,6 +199,16 @@ export type Database = {
           published_at: string | null
           status: string
           storage_path: string
+          timing_error: string | null
+          timing_fingerprint: string | null
+          timing_generated_at: string | null
+          timing_language: string | null
+          timing_low_confidence_count: number
+          timing_model: string | null
+          timing_provider: string | null
+          timing_speaker_count: number
+          timing_status: string
+          timing_word_count: number
           title: string
         }
         Insert: {
@@ -208,6 +224,16 @@ export type Database = {
           published_at?: string | null
           status?: string
           storage_path: string
+          timing_error?: string | null
+          timing_fingerprint?: string | null
+          timing_generated_at?: string | null
+          timing_language?: string | null
+          timing_low_confidence_count?: number
+          timing_model?: string | null
+          timing_provider?: string | null
+          timing_speaker_count?: number
+          timing_status?: string
+          timing_word_count?: number
           title: string
         }
         Update: {
@@ -223,6 +249,16 @@ export type Database = {
           published_at?: string | null
           status?: string
           storage_path?: string
+          timing_error?: string | null
+          timing_fingerprint?: string | null
+          timing_generated_at?: string | null
+          timing_language?: string | null
+          timing_low_confidence_count?: number
+          timing_model?: string | null
+          timing_provider?: string | null
+          timing_speaker_count?: number
+          timing_status?: string
+          timing_word_count?: number
           title?: string
         }
         Relationships: []
